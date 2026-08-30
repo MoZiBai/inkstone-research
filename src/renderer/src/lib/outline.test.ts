@@ -50,4 +50,16 @@ describe('flattenOutline', () => {
     ])
     expect(new Set(result.map(({ node: item }) => item.id)).size).toBe(result.length)
   })
+
+  it('hides every descendant of a collapsed chapter without changing the source tree', () => {
+    const nodes = [
+      node('chapter-a', null, 1000),
+      node('section-a-1', 'chapter-a', 1000),
+      node('subsection-a-1-1', 'section-a-1', 1000),
+      node('chapter-b', null, 2000)
+    ]
+    const result = flattenOutline(nodes, new Set(['chapter-a']))
+    expect(result.map(({ node: item }) => item.id)).toEqual(['chapter-a', 'chapter-b'])
+    expect(nodes).toHaveLength(4)
+  })
 })

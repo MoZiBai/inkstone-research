@@ -1574,6 +1574,10 @@ body.reading-panel-resizing * {
   white-space: nowrap;
 }
 
+.library-state-filter button {
+  min-height: 28px;
+}
+
 .document-group {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1659,6 +1663,26 @@ body.reading-panel-resizing * {
 
 .library-card-list {
   display: grid;
+}
+
+.library-card-overflow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  margin: 10px 14px;
+  color: var(--sage);
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px dashed rgba(99, 123, 109, 0.3);
+  border-radius: 8px;
+  background: rgba(226, 235, 227, 0.4);
+}
+
+.library-card-overflow:hover {
+  border-color: rgba(99, 123, 109, 0.5);
+  background: var(--sage-soft);
 }
 
 .library-card {
@@ -1904,6 +1928,11 @@ body.reading-panel-resizing * {
   flex: 0 0 auto;
   margin-right: 0;
   margin-left: 0;
+}
+
+.synthesis-search-box {
+  min-width: min(300px, 28vw);
+  height: 34px;
 }
 
 .board-scroll {
@@ -2326,6 +2355,28 @@ body.reading-panel-resizing * {
   cursor: pointer;
 }
 
+.outline-collapse-toggle {
+  display: grid;
+  width: 19px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--ink-500);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+}
+
+.outline-collapse-toggle:hover:not(:disabled) {
+  color: var(--terracotta-dark);
+  background: var(--terracotta-soft);
+}
+
+.outline-collapse-toggle:disabled {
+  opacity: 0;
+}
+
 .outline-grip {
   display: grid;
   flex: 0 0 auto;
@@ -2397,6 +2448,11 @@ body.reading-panel-resizing * {
   color: #8d6d35;
 }
 
+.outline-copy .outline-collapsed-summary {
+  color: var(--ink-500);
+  font-size: 11px;
+}
+
 .outline-node-actions {
   display: flex;
   flex: 0 0 auto;
@@ -2437,7 +2493,7 @@ body.reading-panel-resizing * {
 .outline-evidence-list {
   display: grid;
   gap: 6px;
-  margin: 10px 0 0 49px;
+  margin: 10px 0 0 76px;
 }
 
 .outline-evidence {
@@ -2538,10 +2594,55 @@ body.reading-panel-resizing * {
   background: var(--paper-200);
 }
 
+.outline-pool-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 8px;
+  color: var(--ink-600);
+  font-size: 11px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.outline-pool-filter input {
+  margin: 0;
+  accent-color: var(--terracotta);
+}
+
+.outline-pool-filter svg {
+  flex: 0 0 auto;
+}
+
+.outline-pool-filter span {
+  min-width: 0;
+  flex: 1;
+}
+
+.outline-pool-filter small {
+  min-width: 19px;
+  padding: 2px 4px;
+  color: var(--ink-500);
+  text-align: center;
+  border-radius: 8px;
+  background: var(--paper-200);
+}
+
 .pool-card-list {
   display: grid;
   gap: 8px;
   margin-top: 12px;
+}
+
+.pool-card-empty {
+  padding: 26px 12px;
+  color: var(--ink-500);
+  font-size: 12px;
+  line-height: 1.65;
+  text-align: center;
+  border: 1px dashed var(--paper-300);
+  border-radius: 8px;
 }
 
 .pool-card {

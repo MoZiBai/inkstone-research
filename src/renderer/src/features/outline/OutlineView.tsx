@@ -2,11 +2,13 @@ import {
   ArrowDown,
   ArrowUp,
   BookOpenCheck,
+  ChevronDown,
   ChevronRight,
   Edit3,
   FilePlus2,
   GripVertical,
   Link2,
+  ListFilter,
   Plus,
   Search,
   Trash2,
@@ -26,6 +28,7 @@ import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
 import { flattenOutline } from '../../lib/outline'
+import { buildOutlineWorkspaceIndexes, filterProjectCards } from '../../lib/workspaceCollections'
 import type { RunMutation } from '../../types'
 
 interface OutlineViewProps {
@@ -44,7 +47,11 @@ export function OutlineView({
   runMutation,
   onOpenSource
 }: OutlineViewProps): React.JSX.Element {
-  const flatNodes = useMemo(() => flattenOutline(snapshot.outlineNodes), [snapshot.outlineNodes])
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(() => new Set())
+  const flatNodes = useMemo(
+    () => flattenOutline(snapshot.outlineNodes, collapsedNodeIds),
+    [collapsedNodeIds, snapshot.outlineNodes]
+  )
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
     flatNodes[0]?.node.id ?? null
   )
@@ -56,25 +63,46 @@ export function OutlineView({
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [viewingCard, setViewingCard] = useState<ProjectCardView | null>(null)
   const [cardQuery, setCardQuery] = useState('')
+  const [hideLinkedToSelected, setHideLinkedToSelected] = useState(false)
   const deferredCardQuery = useDeferredValue(cardQuery.trim().toLocaleLowerCase())
 
-  useEffect(() => {
-    if (selectedNodeId && snapshot.outlineNodes.some((node) => node.id === selectedNodeId)) return
-    setSelectedNodeId(flatNodes[0]?.node.id ?? null)
-  }, [flatNodes, selectedNodeId, snapshot.outlineNodes])
-
-  const activeCards = useMemo(
-    () =>
-      snapshot.cards.filter((card) => {
-        if (card.synthesisState !== 'active') return false
-        if (!deferredCardQuery) return true
-        return [card.displayText, card.comment, card.documentTitle, card.documentAuthors, ...card.tags]
-          .join('\n')
-          .toLocaleLowerCase()
-          .includes(deferredCardQuery)
-      }),
-    [deferredCardQuery, snapshot.cards]
+  const indexes = useMemo(
+    () => buildOutlineWorkspaceIndexes(snapshot.outlineNodes, snapshot.cards, snapshot.outlineLinks),
+    [snapshot.cards, snapshot.outlineLinks, snapshot.outlineNodes]
   )
+  const childCountByNodeId = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const node of snapshot.outlineNodes) {
+      if (!node.parentId) continue
+      counts.set(node.parentId, (counts.get(node.parentId) ?? 0) + 1)
+    }
+    return counts
+  }, [snapshot.outlineNodes])
+  const selectedLinkedCardIds = selectedNodeId
+    ? indexes.linkedCardIdsByNodeId.get(selectedNodeId) ?? new Set<string>()
+    : new Set<string>()
+
+  useEffect(() => {
+    if (selectedNodeId && flatNodes.some(({ node }) => node.id === selectedNodeId)) return
+    setSelectedNodeId(flatNodes[0]?.node.id ?? null)
+  }, [flatNodes, selectedNodeId])
+
+  const activeCards = useMemo(() => {
+    const matching = filterProjectCards(snapshot.cards, deferredCardQuery, 'active')
+    if (!hideLinkedToSelected || !selectedNodeId) return matching
+    const linkedIds = indexes.linkedCardIdsByNodeId.get(selectedNodeId) ?? new Set<string>()
+    return matching.filter((card) => !linkedIds.has(card.id))
+  }, [deferredCardQuery, hideLinkedToSelected, indexes.linkedCardIdsByNodeId, selectedNodeId, snapshot.cards])
+
+  const toggleNodeCollapsed = (nodeId: string): void => {
+    setSelectedNodeId(nodeId)
+    setCollapsedNodeIds((current) => {
+      const next = new Set(current)
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
+    })
+  }
 
   const moveNode = async (): Promise<void> => {
     if (!draggedNodeId || !dropTarget) return
@@ -135,12 +163,15 @@ export function OutlineView({
           </div>
 
           {flatNodes.map(({ node, depth }) => {
-            const links = snapshot.outlineLinks.filter((link) => link.outlineNodeId === node.id)
+            const links = indexes.linksByNodeId.get(node.id) ?? []
+            const childCount = childCountByNodeId.get(node.id) ?? 0
+            const canCollapse = childCount > 0 || links.length > 0
+            const collapsed = canCollapse && collapsedNodeIds.has(node.id)
             const isSelected = node.id === selectedNodeId
             const targetPlacement = dropTarget?.nodeId === node.id ? dropTarget.placement : null
             return (
               <article
-                className={`outline-node ${isSelected ? 'selected' : ''} ${
+                className={`outline-node ${isSelected ? 'selected' : ''} ${collapsed ? 'collapsed' : ''} ${
                   targetPlacement ? `drop-${targetPlacement}` : ''
                 }`}
                 key={node.id}
@@ -173,6 +204,20 @@ export function OutlineView({
                   <span className="outline-grip">
                     <GripVertical size={14} />
                   </span>
+                  <button
+                    className="outline-collapse-toggle"
+                    type="button"
+                    disabled={!canCollapse}
+                    aria-label={collapsed ? '展开章节' : '收起章节'}
+                    aria-expanded={!collapsed}
+                    title={canCollapse ? (collapsed ? '展开章节内容和子章节' : '收起章节内容和子章节') : '没有可收起的内容'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      if (canCollapse) toggleNodeCollapsed(node.id)
+                    }}
+                  >
+                    {canCollapse ? (collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />) : null}
+                  </button>
                   <span className="outline-index" style={{ borderColor: isSelected ? '#a35f43' : undefined }}>
                     {depth + 1}
                   </span>
@@ -181,11 +226,17 @@ export function OutlineView({
                       <h3>{node.title}</h3>
                       <span>{links.length} 张卡片</span>
                     </div>
-                    {node.coreArgument ? <p className="core-argument">{node.coreArgument}</p> : null}
-                    {node.notes ? <p>{node.notes}</p> : null}
-                    {node.openQuestions ? (
-                      <p className="open-question">待解决：{node.openQuestions}</p>
-                    ) : null}
+                    {collapsed ? (
+                      <p className="outline-collapsed-summary">已收起 · {childCount} 个子章节 · {links.length} 张卡片</p>
+                    ) : (
+                      <>
+                        {node.coreArgument ? <p className="core-argument">{node.coreArgument}</p> : null}
+                        {node.notes ? <p>{node.notes}</p> : null}
+                        {node.openQuestions ? (
+                          <p className="open-question">待解决：{node.openQuestions}</p>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                   <div className="outline-node-actions">
                     <button
@@ -221,10 +272,10 @@ export function OutlineView({
                   </div>
                 </div>
 
-                {links.length > 0 ? (
+                {!collapsed && links.length > 0 ? (
                   <div className="outline-evidence-list">
                     {links.map((link, linkIndex) => {
-                      const card = snapshot.cards.find((candidate) => candidate.id === link.projectCardId)
+                      const card = indexes.cardsById.get(link.projectCardId)
                       if (!card) return null
                       return (
                         <div className="outline-evidence" key={link.id}>
@@ -331,26 +382,28 @@ export function OutlineView({
               <span>
                 将卡片关联到
                 <strong>
-                  {snapshot.outlineNodes.find((node) => node.id === selectedNodeId)?.title}
+                  {indexes.nodesById.get(selectedNodeId)?.title}
                 </strong>
               </span>
             </div>
           ) : (
             <div className="selected-chapter-note muted">请先选择一个章节。</div>
           )}
+          <label className="outline-pool-filter">
+            <input
+              type="checkbox"
+              checked={hideLinkedToSelected}
+              disabled={!selectedNodeId}
+              onChange={(event) => setHideLinkedToSelected(event.target.checked)}
+            />
+            <ListFilter size={13} />
+            <span>隐藏已关联到本章的卡片</span>
+            <small>{selectedLinkedCardIds.size}</small>
+          </label>
           <div className="pool-card-list">
             {activeCards.map((card) => {
-              const linkedToSelected = snapshot.outlineLinks.some(
-                (link) =>
-                  link.outlineNodeId === selectedNodeId && link.projectCardId === card.id
-              )
-              const usageTitles = snapshot.outlineLinks
-                .filter((link) => link.projectCardId === card.id)
-                .map((link) =>
-                  snapshot.outlineNodes.find((node) => node.id === link.outlineNodeId)
-                )
-                .filter((node): node is OutlineNode => Boolean(node))
-                .map((node) => node.title)
+              const linkedToSelected = selectedLinkedCardIds.has(card.id)
+              const usageTitles = indexes.usageTitlesByCardId.get(card.id) ?? []
               const usageLabel =
                 usageTitles.length > 0 ? `已用于：${usageTitles.join('、')}` : '尚未进入提纲'
               return (
@@ -379,6 +432,15 @@ export function OutlineView({
                 </article>
               )
             })}
+            {activeCards.length === 0 ? (
+              <div className="pool-card-empty">
+                {deferredCardQuery
+                  ? '没有匹配的整理中卡片。'
+                  : hideLinkedToSelected
+                  ? '整理中卡片都已关联到当前章节。'
+                  : '二次整理中暂无可用卡片。'}
+              </div>
+            ) : null}
           </div>
         </aside>
       </div>

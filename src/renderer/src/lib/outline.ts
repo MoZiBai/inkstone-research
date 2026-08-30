@@ -5,7 +5,10 @@ export interface FlatOutlineNode {
   depth: number
 }
 
-export function flattenOutline(nodes: OutlineNode[]): FlatOutlineNode[] {
+export function flattenOutline(
+  nodes: OutlineNode[],
+  collapsedNodeIds: ReadonlySet<string> = new Set()
+): FlatOutlineNode[] {
   const children = new Map<string | null, OutlineNode[]>()
   for (const node of nodes) {
     const list = children.get(node.parentId) ?? []
@@ -18,11 +21,19 @@ export function flattenOutline(nodes: OutlineNode[]): FlatOutlineNode[] {
 
   const result: FlatOutlineNode[] = []
   const visited = new Set<string>()
+  const hideDescendants = (parentId: string): void => {
+    for (const child of children.get(parentId) ?? []) {
+      if (visited.has(child.id)) continue
+      visited.add(child.id)
+      hideDescendants(child.id)
+    }
+  }
   const appendNode = (node: OutlineNode, depth: number): void => {
     if (visited.has(node.id)) return
     visited.add(node.id)
     result.push({ node, depth })
-    append(node.id, depth + 1)
+    if (collapsedNodeIds.has(node.id)) hideDescendants(node.id)
+    else append(node.id, depth + 1)
   }
   const append = (parentId: string | null, depth: number): void => {
     for (const node of children.get(parentId) ?? []) {

@@ -11,10 +11,11 @@ import {
   Palette,
   Plus,
   RotateCcw,
+  Search,
   SlidersHorizontal,
   Trash2
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type {
   ProjectCardView,
   SynthesisCategory,
@@ -25,6 +26,7 @@ import { CardEditDialog } from '../../components/CardEditDialog'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
+import { filterProjectCards, groupCardsByCategory } from '../../lib/workspaceCollections'
 import type { RunMutation } from '../../types'
 
 interface SynthesisViewProps {
@@ -66,6 +68,8 @@ export function SynthesisView({
   )
   const [editingCard, setEditingCard] = useState<ProjectCardView | null>(null)
   const [editingCategory, setEditingCategory] = useState<SynthesisCategory | 'new' | null>(null)
+  const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
   const activeCards = useMemo(
     () => snapshot.cards.filter((card) => card.synthesisState === 'active'),
     [snapshot.cards]
@@ -74,11 +78,29 @@ export function SynthesisView({
     () => snapshot.cards.filter((card) => card.synthesisState === 'excluded'),
     [snapshot.cards]
   )
+  const visibleActiveCards = useMemo(
+    () => filterProjectCards(snapshot.cards, deferredQuery, 'active'),
+    [deferredQuery, snapshot.cards]
+  )
+  const visibleExcludedCards = useMemo(
+    () => filterProjectCards(snapshot.cards, deferredQuery, 'excluded'),
+    [deferredQuery, snapshot.cards]
+  )
+  const cardsByCategory = useMemo(
+    () => groupCardsByCategory(visibleActiveCards, snapshot.categories),
+    [snapshot.categories, visibleActiveCards]
+  )
+  const categoryById = useMemo(
+    () => new Map(snapshot.categories.map((category) => [category.id, category])),
+    [snapshot.categories]
+  )
 
   useEffect(() => setMode(initialMode), [initialMode])
 
   useEffect(() => {
     if (!focusCardId) return
+    if (query) setQuery('')
+    if (deferredQuery) return
     const focusedCard = snapshot.cards.find((card) => card.id === focusCardId)
     if (focusedCard?.synthesisState === 'active') {
       const focusedCategoryId =
@@ -110,7 +132,7 @@ export function SynthesisView({
       onFocusHandled()
     }, 80)
     return () => window.clearTimeout(timeout)
-  }, [focusCardId, mode, onFocusHandled, snapshot.cards, snapshot.categories])
+  }, [deferredQuery, focusCardId, mode, onFocusHandled, query, snapshot.cards, snapshot.categories])
 
   const moveCard = async (categoryId: string, explicitCardId?: string): Promise<void> => {
     const cardId = explicitCardId || draggedCardId
@@ -187,6 +209,15 @@ export function SynthesisView({
           <p>项目全部卡片进入此处；剔除只退出整理工作区，不删除卡片。</p>
         </div>
         <div className="heading-actions">
+          <label className="search-box synthesis-search-box">
+            <Search size={15} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索摘录、评论、作者或标签"
+            />
+            <span>{mode === 'active' ? visibleActiveCards.length : visibleExcludedCards.length}</span>
+          </label>
           <div className="segmented-control">
             <button
               className={mode === 'active' ? 'active' : ''}
@@ -219,12 +250,9 @@ export function SynthesisView({
             }}
           >
             {snapshot.categories.map((category, categoryIndex) => {
-              const categoryCards = activeCards.filter((card) => {
-                if (card.categoryId) return card.categoryId === category.id
-                return category.isDefault
-              })
-              const categoryCollapsed = collapsedCategoryIds.has(category.id)
-              const categoryExpanded = expandedCategoryIds.has(category.id)
+              const categoryCards = cardsByCategory.get(category.id) ?? []
+              const categoryCollapsed = !deferredQuery && collapsedCategoryIds.has(category.id)
+              const categoryExpanded = Boolean(deferredQuery) || expandedCategoryIds.has(category.id)
               const visibleCategoryCards = categoryExpanded
                 ? categoryCards
                 : categoryCards.slice(0, collapsedCardPreviewCount)
@@ -260,10 +288,17 @@ export function SynthesisView({
                     <div className="column-tools">
                       <button
                         type="button"
+                        disabled={Boolean(deferredQuery)}
                         onClick={() => toggleCategoryCollapsed(category.id)}
                         aria-label={categoryCollapsed ? '展开分类' : '收起分类'}
                         aria-expanded={!categoryCollapsed}
-                        title={categoryCollapsed ? '展开分类' : '收起分类'}
+                        title={
+                          deferredQuery
+                            ? '搜索时会自动展开匹配结果'
+                            : categoryCollapsed
+                              ? '展开分类'
+                              : '收起分类'
+                        }
                       >
                         {categoryCollapsed ? (
                           <ChevronRight size={14} />
@@ -357,7 +392,7 @@ export function SynthesisView({
                         </button>
                       </article>
                     ))}
-                    {categoryCards.length > collapsedCardPreviewCount ? (
+                    {!deferredQuery && categoryCards.length > collapsedCardPreviewCount ? (
                       <button
                         className="category-card-overflow"
                         type="button"
@@ -376,8 +411,8 @@ export function SynthesisView({
                     ) : null}
                     {categoryCards.length === 0 ? (
                       <div className="column-empty">
-                        <SlidersHorizontal size={18} />
-                        <span>拖入卡片</span>
+                        {deferredQuery ? <Search size={18} /> : <SlidersHorizontal size={18} />}
+                        <span>{deferredQuery ? '本分类没有匹配卡片' : '拖入卡片'}</span>
                       </div>
                     ) : null}
                   </div>
@@ -389,10 +424,8 @@ export function SynthesisView({
         </div>
       ) : (
         <div className="excluded-list">
-          {excludedCards.map((card) => {
-            const previousCategory = snapshot.categories.find(
-              (category) => category.id === card.categoryId
-            )
+          {visibleExcludedCards.map((card) => {
+            const previousCategory = card.categoryId ? categoryById.get(card.categoryId) : undefined
             return (
               <article
                 className="excluded-card"
@@ -424,11 +457,15 @@ export function SynthesisView({
               </article>
             )
           })}
-          {excludedCards.length === 0 ? (
+          {visibleExcludedCards.length === 0 ? (
             <EmptyState
               icon={Layers3}
-              title="没有已剔除卡片"
-              description="从整理板剔除的卡片会保留在这里，并可随时恢复。"
+              title={deferredQuery ? '没有匹配的已剔除卡片' : '没有已剔除卡片'}
+              description={
+                deferredQuery
+                  ? '尝试缩短关键词，或清空搜索条件。'
+                  : '从整理板剔除的卡片会保留在这里，并可随时恢复。'
+              }
             />
           ) : null}
         </div>
