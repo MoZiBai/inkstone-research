@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
+pub const SCHEMA_VERSION: i64 = 5;
+
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -218,7 +220,7 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
             ALTER TABLE project_cards ADD COLUMN text_override TEXT NOT NULL DEFAULT '';
             "#,
         )?;
-        connection.pragma_update(None, "user_version", 5)?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     Ok(())
 }

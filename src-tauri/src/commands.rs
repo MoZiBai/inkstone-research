@@ -1,29 +1,41 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use chrono::Utc;
 use tauri::{ipc::Response, State};
+use uuid::Uuid;
 
 use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, ImportPdfInput,
-    ImportPdfResult, MoveOutlineNodeInput, RemoveDocumentInput, UpdateCardInput,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, DatabaseImportResult,
+    ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, RemoveDocumentInput, UpdateCardInput,
     UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineNodeInput, WorkspaceSnapshot,
 };
 use crate::pdf_files::{
-    discard_managed_pdf, prepare_pdf_copy, read_managed_pdf, reveal_managed_pdf,
+    discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
+    reveal_managed_pdf,
 };
 
 pub struct AppState {
-    repository: Mutex<Repository>,
+    repository: Arc<Mutex<Repository>>,
+    database_path: PathBuf,
+    backup_directory: PathBuf,
     pdf_library_directory: PathBuf,
 }
 
 impl AppState {
-    pub fn new(repository: Repository, pdf_library_directory: PathBuf) -> Self {
+    pub fn new(
+        repository: Repository,
+        database_path: PathBuf,
+        backup_directory: PathBuf,
+        pdf_library_directory: PathBuf,
+    ) -> Self {
         Self {
-            repository: Mutex::new(repository),
+            repository: Arc::new(Mutex::new(repository)),
+            database_path,
+            backup_directory,
             pdf_library_directory,
         }
     }
@@ -40,7 +52,13 @@ pub fn get_workspace(
     project_id: Option<String>,
     state: State<'_, AppState>,
 ) -> AppResult<WorkspaceSnapshot> {
-    state.lock()?.get_workspace(project_id.as_deref())
+    let mut snapshot = state.lock()?.get_workspace(project_id.as_deref())?;
+    for document in &mut snapshot.documents {
+        document.file_available = document.file_path.as_deref().is_some_and(|path| {
+            managed_pdf_is_available(&PathBuf::from(path), &state.pdf_library_directory)
+        });
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -87,6 +105,15 @@ pub async fn import_pdf(
     input: ImportPdfInput,
     state: State<'_, AppState>,
 ) -> AppResult<ImportPdfResult> {
+    let allow_missing_pdf_relink = if let Some(document_id) = input.target_document_id.as_deref() {
+        state
+            .lock()?
+            .stored_pdf_path(document_id)?
+            .as_deref()
+            .is_some_and(|path| !managed_pdf_is_available(path, &state.pdf_library_directory))
+    } else {
+        false
+    };
     let source_path = PathBuf::from(&input.source_path);
     let library_directory = state.pdf_library_directory.clone();
     let prepared = tauri::async_runtime::spawn_blocking(move || {
@@ -99,7 +126,83 @@ pub async fn import_pdf(
         &prepared.managed_path,
         &prepared.file_hash,
         prepared.reused_managed_file,
+        allow_missing_pdf_relink,
     )
+}
+
+#[tauri::command]
+pub async fn export_database(
+    destination_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let destination = PathBuf::from(destination_path);
+    if paths_refer_to_same_file(&destination, &state.database_path) {
+        return Err(crate::error::AppError::Validation(
+            "不能用导出文件覆盖应用正在使用的数据库。".into(),
+        ));
+    }
+    let repository = Arc::clone(&state.repository);
+    let returned_path = destination.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        guard.export_database(&destination)
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("数据库导出任务失败：{error}"))
+    })??;
+    Ok(returned_path)
+}
+
+#[tauri::command]
+pub async fn import_database(
+    source_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<DatabaseImportResult> {
+    let source = PathBuf::from(source_path);
+    if paths_refer_to_same_file(&source, &state.database_path) {
+        return Err(crate::error::AppError::Validation(
+            "不能把应用正在使用的数据库作为导入文件。".into(),
+        ));
+    }
+    let safety_backup = state.backup_directory.join(format!(
+        "inkstone-before-import-{}-{}.db",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        &Uuid::new_v4().to_string()[..8]
+    ));
+    let repository = Arc::clone(&state.repository);
+    let pdf_library_directory = state.pdf_library_directory.clone();
+    let returned_safety_path = safety_backup.to_string_lossy().into_owned();
+    let missing_pdf_count = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        guard.import_database(&source, &safety_backup)?;
+        let paths = guard.document_pdf_paths()?;
+        Ok::<i64, crate::error::AppError>(
+            paths
+                .iter()
+                .filter(|path| !managed_pdf_is_available(path, &pdf_library_directory))
+                .count() as i64,
+        )
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("数据库导入任务失败：{error}"))
+    })??;
+    Ok(DatabaseImportResult {
+        safety_backup_path: returned_safety_path,
+        missing_pdf_count,
+    })
+}
+
+fn paths_refer_to_same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
+    match (first.canonicalize(), second.canonicalize()) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => first == second,
+    }
 }
 
 #[tauri::command]

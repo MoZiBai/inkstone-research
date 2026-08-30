@@ -31,6 +31,7 @@ pub struct DocumentSummary {
     pub is_removed: bool,
     pub file_path: Option<String>,
     pub file_hash: Option<String>,
+    pub file_available: bool,
     pub sort_order: i64,
     pub card_count: i64,
     pub created_at: String,
@@ -246,6 +247,15 @@ pub struct ImportPdfResult {
     pub document_id: String,
     pub reused_managed_file: bool,
     pub reused_document: bool,
+    pub relinked_document: bool,
+    pub hash_changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseImportResult {
+    pub safety_backup_path: String,
+    pub missing_pdf_count: i64,
 }
 
 #[derive(Debug, Deserialize)]

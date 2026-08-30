@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::backup::Backup;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -15,7 +18,7 @@ use crate::models::{
     UpdateDocumentInput, UpdateOutlineNodeInput, WorkspaceSnapshot,
 };
 
-use super::schema::{migrate_database, seed_database};
+use super::schema::{migrate_database, seed_database, SCHEMA_VERSION};
 
 pub struct Repository {
     connection: Connection,
@@ -122,6 +125,7 @@ impl Repository {
                     is_removed: row.get::<_, i64>(11)? == 1,
                     file_path: row.get(12)?,
                     file_hash: row.get(13)?,
+                    file_available: false,
                     sort_order: row.get(14)?,
                     card_count: row.get(15)?,
                     created_at: row.get(16)?,
@@ -591,6 +595,7 @@ impl Repository {
         managed_path: &Path,
         file_hash: &str,
         reused_managed_file: bool,
+        allow_missing_pdf_relink: bool,
     ) -> AppResult<ImportPdfResult> {
         let metadata = normalize_document_metadata(
             &input.title,
@@ -609,27 +614,38 @@ impl Repository {
         let now = timestamp();
         let managed_path = managed_path.to_string_lossy().into_owned();
         let transaction = self.connection.transaction()?;
+        let mut relinked_document = false;
+        let mut hash_changed = false;
         let (document_id, reused_document) = if let Some(target_document_id) =
             input.target_document_id.as_deref()
         {
-            let current_file_path = transaction
+            let (current_file_path, current_file_hash) = transaction
                 .query_row(
                     r#"
-                        SELECT d.file_path
+                        SELECT d.file_path, d.file_hash
                         FROM documents d
                         JOIN project_documents pd ON pd.document_id = d.id
                         WHERE d.id = ?1 AND pd.project_id = ?2
                         "#,
                     params![target_document_id, input.project_id],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
                 )
                 .optional()?
                 .ok_or_else(|| AppError::NotFound("当前项目中的文献".into()))?;
-            if current_file_path.is_some() {
+            if current_file_path.is_some() && !allow_missing_pdf_relink {
                 return Err(AppError::Validation(
                     "这篇文献已经连接 PDF；为避免改变已有摘录的来源，本阶段不允许直接替换。".into(),
                 ));
             }
+            relinked_document = current_file_path.is_some();
+            hash_changed = current_file_hash
+                .as_deref()
+                .is_some_and(|current_hash| current_hash != file_hash);
             transaction.execute(
                 r#"
                     UPDATE documents
@@ -724,6 +740,8 @@ impl Repository {
             document_id,
             reused_managed_file,
             reused_document,
+            relinked_document,
+            hash_changed,
         })
     }
 
@@ -739,6 +757,88 @@ impl Repository {
             .ok_or_else(|| AppError::NotFound("文献".into()))?
             .ok_or_else(|| AppError::Validation("这篇文献尚未连接 PDF 文件。".into()))?;
         Ok(PathBuf::from(file_path))
+    }
+
+    pub fn stored_pdf_path(&self, document_id: &str) -> AppResult<Option<PathBuf>> {
+        let file_path = self
+            .connection
+            .query_row(
+                "SELECT file_path FROM documents WHERE id = ?1",
+                params![document_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("文献".into()))?;
+        Ok(file_path.map(PathBuf::from))
+    }
+
+    pub fn export_database(&self, destination: &Path) -> AppResult<()> {
+        let parent = destination
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .ok_or_else(|| AppError::Validation("备份目标目录不存在。".into()))?;
+        let temporary = parent.join(format!(".inkstone-export-{}.tmp", Uuid::new_v4()));
+        let result = (|| -> AppResult<()> {
+            create_database_copy(&self.connection, &temporary)?;
+            validate_database_file(&temporary)?;
+            replace_file(&temporary, destination)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn import_database(&mut self, source: &Path, safety_backup: &Path) -> AppResult<()> {
+        validate_database_file(source)?;
+        self.export_database(safety_backup)?;
+
+        let database_parent = safety_backup
+            .parent()
+            .ok_or_else(|| AppError::Validation("无法确定数据库恢复目录。".into()))?;
+        let prepared = database_parent.join(format!(".inkstone-import-{}.tmp", Uuid::new_v4()));
+        let import_result = (|| -> AppResult<()> {
+            fs::copy(source, &prepared)?;
+            {
+                let mut prepared_connection = Connection::open(&prepared)?;
+                migrate_database(&mut prepared_connection)?;
+                ensure_foreign_keys_are_valid(&prepared_connection)?;
+            }
+            validate_database_file(&prepared)?;
+            restore_database_copy(&mut self.connection, &prepared)?;
+            migrate_database(&mut self.connection)?;
+            ensure_foreign_keys_are_valid(&self.connection)?;
+            Ok(())
+        })();
+
+        let _ = fs::remove_file(&prepared);
+        if let Err(import_error) = import_result {
+            let rollback_result = restore_database_copy(&mut self.connection, safety_backup)
+                .and_then(|_| migrate_database(&mut self.connection).map_err(AppError::from));
+            return match rollback_result {
+                Ok(()) => Err(AppError::Validation(format!(
+                    "导入失败，当前资料库已自动恢复：{import_error}"
+                ))),
+                Err(rollback_error) => Err(AppError::Validation(format!(
+                    "导入失败且自动恢复未完成。原资料库备份位于 {}。导入错误：{import_error}；恢复错误：{rollback_error}",
+                    safety_backup.display()
+                ))),
+            };
+        }
+        Ok(())
+    }
+
+    pub fn document_pdf_paths(&self) -> AppResult<Vec<PathBuf>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT file_path FROM documents WHERE file_path IS NOT NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
 
     pub fn create_card_from_selection(
@@ -1459,6 +1559,114 @@ impl Repository {
     }
 }
 
+fn create_database_copy(source: &Connection, destination: &Path) -> AppResult<()> {
+    if destination.exists() {
+        return Err(AppError::Validation("临时数据库文件已存在。".into()));
+    }
+    let mut destination_connection = Connection::open(destination)?;
+    let backup = Backup::new(source, &mut destination_connection)?;
+    backup.run_to_completion(128, Duration::from_millis(10), None)?;
+    drop(backup);
+    destination_connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(())
+}
+
+fn restore_database_copy(destination: &mut Connection, source: &Path) -> AppResult<()> {
+    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let backup = Backup::new(&source_connection, destination)?;
+    backup.run_to_completion(128, Duration::from_millis(10), None)?;
+    drop(backup);
+    destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(())
+}
+
+fn validate_database_file(path: &Path) -> AppResult<()> {
+    if !path.is_file() {
+        return Err(AppError::Validation("选择的数据库备份不存在。".into()));
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(AppError::Validation(format!(
+            "数据库完整性检查未通过：{integrity}"
+        )));
+    }
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(AppError::Validation(format!(
+            "数据库版本不受支持（版本 {version}，当前支持 1–{SCHEMA_VERSION}）。"
+        )));
+    }
+    let mut required_tables = vec![
+        "projects",
+        "documents",
+        "project_documents",
+        "source_excerpts",
+        "project_cards",
+        "synthesis_categories",
+        "outline_nodes",
+        "outline_card_links",
+    ];
+    if version >= 2 {
+        required_tables.push("pdf_annotations");
+    }
+    if version >= 4 {
+        required_tables.push("reading_notes");
+    }
+    for table in required_tables {
+        let exists: i64 = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            params![table],
+            |row| row.get(0),
+        )?;
+        if exists != 1 {
+            return Err(AppError::Validation(format!(
+                "所选文件不是完整的砚台数据库（缺少 {table}）。"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_foreign_keys_are_valid(connection: &Connection) -> AppResult<()> {
+    let violation = connection
+        .query_row(
+            "SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(table) = violation {
+        return Err(AppError::Validation(format!(
+            "数据库关联完整性检查未通过（表 {table}）。"
+        )));
+    }
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> AppResult<()> {
+    if !destination.exists() {
+        fs::rename(source, destination)?;
+        return Ok(());
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::Validation("无法确定备份目标目录。".into()))?;
+    let displaced = parent.join(format!(".inkstone-replaced-{}.tmp", Uuid::new_v4()));
+    fs::rename(destination, &displaced)?;
+    match fs::rename(source, destination) {
+        Ok(()) => {
+            let _ = fs::remove_file(displaced);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::rename(&displaced, destination);
+            Err(AppError::Io(error))
+        }
+    }
+}
+
 fn timestamp() -> String {
     Utc::now().to_rfc3339()
 }
@@ -1988,6 +2196,175 @@ mod tests {
     }
 
     #[test]
+    fn database_export_and_import_preserve_workspace_and_create_safety_backup() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-database-transfer")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create database transfer directory");
+        let source_path = root.join("source.db");
+        let exported_path = root.join("exported.db");
+        let target_path = root.join("target.db");
+        let safety_path = root.join("before-import.db");
+
+        let (note_id, annotation_id) = {
+            let mut source = Repository::open(&source_path).expect("open source repository");
+            source
+                .connection
+                .execute(
+                    "UPDATE documents SET file_path = 'managed.pdf', file_hash = 'managed-hash' WHERE id = 'seed-document-space'",
+                    [],
+                )
+                .expect("attach PDF metadata for annotation backup test");
+            source
+                .connection
+                .execute(
+                    "UPDATE project_cards SET text_override = '人工修正后的摘录' WHERE id = 'seed-card-1'",
+                    [],
+                )
+                .expect("store corrected excerpt text");
+            let note_id = source
+                .create_reading_note(CreateReadingNoteInput {
+                    project_id: "seed-project-tombs".into(),
+                    document_id: "seed-document-space".into(),
+                    kind: "insight".into(),
+                    content: "这条笔记用于验证整库备份。".into(),
+                    selected_text: String::new(),
+                    page_number: None,
+                    locator_json: String::new(),
+                })
+                .expect("create source note");
+            let annotation_id = source
+                .create_pdf_annotation(CreatePdfAnnotationInput {
+                    project_id: "seed-project-tombs".into(),
+                    document_id: "seed-document-space".into(),
+                    kind: "underline".into(),
+                    page_number: 17,
+                    color: "#a45f45".into(),
+                    selected_text: "用于验证批注备份".into(),
+                    locator_json: r#"{"version":1,"page":17,"rects":[{"x":0.1,"y":0.2,"width":0.3,"height":0.04}]}"#.into(),
+                    comment: String::new(),
+                })
+                .expect("create source annotation");
+            source
+                .export_database(&exported_path)
+                .expect("export consistent database copy");
+            (note_id, annotation_id)
+        };
+
+        {
+            let mut target = Repository::open(&target_path).expect("open target repository");
+            let target_only_project = target
+                .create_project(CreateProjectInput {
+                    name: "导入前独有项目".into(),
+                    description: String::new(),
+                    color: None,
+                })
+                .expect("create target-only project");
+            target
+                .import_database(&exported_path, &safety_path)
+                .expect("import complete database");
+
+            let restored = target
+                .get_workspace(Some("seed-project-tombs"))
+                .expect("load imported workspace");
+            assert!(restored.reading_notes.iter().any(|note| note.id == note_id));
+            assert!(restored
+                .pdf_annotations
+                .iter()
+                .any(|annotation| annotation.id == annotation_id));
+            assert_eq!(
+                restored
+                    .cards
+                    .iter()
+                    .find(|card| card.id == "seed-card-1")
+                    .expect("restored corrected card")
+                    .display_text,
+                "人工修正后的摘录"
+            );
+            assert!(restored
+                .outline_links
+                .iter()
+                .any(|link| link.id == "seed-link-1"));
+            assert!(!restored
+                .projects
+                .iter()
+                .any(|project| project.id == target_only_project));
+
+            let safety = Repository::open(&safety_path).expect("open automatic safety backup");
+            assert!(safety
+                .get_workspace(Some(&target_only_project))
+                .expect("load safety backup")
+                .projects
+                .iter()
+                .any(|project| project.id == target_only_project));
+        }
+
+        fs::remove_dir_all(root).expect("remove database transfer directory");
+    }
+
+    #[test]
+    fn relinking_a_missing_pdf_preserves_existing_excerpts_and_reports_hash_change() {
+        let mut repository = Repository::memory().expect("memory database");
+        repository
+            .connection
+            .execute(
+                "UPDATE documents SET file_path = 'missing-old.pdf', file_hash = 'old-hash' WHERE id = 'seed-document-space'",
+                [],
+            )
+            .expect("record missing PDF");
+        let original = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace before relink")
+            .cards
+            .into_iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("original card");
+
+        let result = repository
+            .register_imported_pdf(
+                &ImportPdfInput {
+                    project_id: "seed-project-tombs".into(),
+                    source_path: "replacement.pdf".into(),
+                    target_document_id: Some("seed-document-space".into()),
+                    title: "从墓葬空间看社会关系的形成".into(),
+                    authors: "陈明远".into(),
+                    year: Some(2022),
+                    journal: String::new(),
+                    volume: String::new(),
+                    issue: String::new(),
+                    pages: String::new(),
+                    doi: String::new(),
+                    publisher: String::new(),
+                    metadata_raw: String::new(),
+                },
+                Path::new("managed-new.pdf"),
+                "new-hash",
+                false,
+                true,
+            )
+            .expect("relink missing PDF");
+        assert!(result.relinked_document);
+        assert!(result.hash_changed);
+
+        let restored = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after relink");
+        let card = restored
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("card remains after relink");
+        assert_eq!(card.raw_text, original.raw_text);
+        assert_eq!(card.locator_json, original.locator_json);
+        assert_eq!(card.source_hash, original.source_hash);
+        assert!(restored
+            .outline_links
+            .iter()
+            .any(|link| link.project_card_id == "seed-card-1"));
+    }
+
+    #[test]
     fn removing_one_outline_link_keeps_other_links_and_card() {
         let mut repository = Repository::memory().expect("memory database");
         let second_link = repository
@@ -2289,6 +2666,7 @@ mod tests {
                     &prepared.managed_path,
                     &prepared.file_hash,
                     prepared.reused_managed_file,
+                    false,
                 )
                 .expect("register first PDF import");
             assert!(!first_import.reused_document);
@@ -2347,6 +2725,7 @@ mod tests {
                     &prepared_again.managed_path,
                     &prepared_again.file_hash,
                     prepared_again.reused_managed_file,
+                    false,
                 )
                 .expect("register second PDF import");
             assert!(second_import.reused_document);

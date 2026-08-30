@@ -31,6 +31,7 @@ export interface DocumentSummary {
   isRemoved: boolean
   filePath: string | null
   fileHash: string | null
+  fileAvailable: boolean
   sortOrder: number
   cardCount: number
   createdAt: string
@@ -192,6 +193,13 @@ export interface ImportPdfResult {
   documentId: string
   reusedManagedFile: boolean
   reusedDocument: boolean
+  relinkedDocument: boolean
+  hashChanged: boolean
+}
+
+export interface DatabaseImportResult {
+  safetyBackupPath: string
+  missingPdfCount: number
 }
 
 export interface CreateCardFromSelectionInput {
@@ -277,6 +285,8 @@ export interface InkstoneApi {
   removeDocument: (input: RemoveDocumentInput) => Promise<void>
   restoreDocument: (projectId: string, documentId: string) => Promise<void>
   importPdf: (input: ImportPdfInput) => Promise<ImportPdfResult>
+  exportDatabase: (destinationPath: string) => Promise<string>
+  importDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   readPdf: (documentId: string) => Promise<ArrayBuffer>
   revealPdfInFileManager: (documentId: string) => Promise<void>
   createCardFromSelection: (input: CreateCardFromSelectionInput) => Promise<string>

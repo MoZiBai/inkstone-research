@@ -101,6 +101,10 @@ pub fn read_managed_pdf(path: &Path, library_directory: &Path) -> AppResult<Vec<
     Ok(fs::read(canonical_path)?)
 }
 
+pub fn managed_pdf_is_available(path: &Path, library_directory: &Path) -> bool {
+    validated_managed_pdf_path(path, library_directory).is_ok()
+}
+
 pub fn reveal_managed_pdf(path: &Path, library_directory: &Path) -> AppResult<()> {
     let canonical_path = validated_managed_pdf_path(path, library_directory)?;
 

@@ -295,6 +295,12 @@ export function ReadingView({
       notify('请先选择一个 PDF 文件。')
       return
     }
+    const targetDocument = snapshot.documents.find(
+      (document) => document.id === importTargetDocumentId
+    )
+    const relinkingMissingPdf = Boolean(
+      targetDocument?.filePath && !targetDocument.fileAvailable
+    )
     const resultHolder: { value: ImportPdfResult | null } = { value: null }
     const succeeded = await runMutation(
       async () => {
@@ -305,13 +311,16 @@ export function ReadingView({
           ...metadataInput(metadata)
         })
       },
-      'PDF 已导入本地文献库。'
+      relinkingMissingPdf ? 'PDF 已重新链接，原有研究数据保持不变。' : 'PDF 已导入本地文献库。'
     )
     const result = resultHolder.value
     if (succeeded && result) {
       setSelectedDocumentId(result.documentId)
       setShowImportDialog(false)
       setImportSourcePath(null)
+      if (result.hashChanged) {
+        notify('重新链接的 PDF 与原文件哈希不同；卡片和标注定位已保留，请抽查原文位置。')
+      }
     }
   }
 
@@ -613,7 +622,7 @@ export function ReadingView({
       />
 
       <section className="pdf-stage">
-        {selectedDocument?.filePath ? (
+        {selectedDocument?.fileAvailable ? (
           <PdfViewer
             document={selectedDocument}
             annotations={documentAnnotations}
@@ -633,13 +642,17 @@ export function ReadingView({
               <span />
               <BookOpen size={34} strokeWidth={1.35} />
             </span>
-            <span className="eyebrow">连接本地 PDF</span>
+            <span className="eyebrow">
+              {selectedDocument.filePath ? 'PDF 管理副本缺失' : '连接本地 PDF'}
+            </span>
             <h2>{selectedDocument.title}</h2>
             <p>
-              选择原始 PDF 后，砚台会按 SHA-256 保存一份只读副本。原文件不会被修改，后续摘录和批注会保存在本地 SQLite。
+              {selectedDocument.filePath
+                ? '数据库中的研究卡片、标注和原文坐标仍然完整。请选择这篇文献的 PDF 重新链接；原文件不会被修改。'
+                : '选择原始 PDF 后，砚台会按 SHA-256 保存一份只读副本。原文件不会被修改，后续摘录和批注会保存在本地 SQLite。'}
             </p>
             <button className="button primary" type="button" onClick={() => beginImport(selectedDocument)}>
-              <Link2 size={15} /> 选择 PDF 文件
+              <Link2 size={15} /> {selectedDocument.filePath ? '重新链接 PDF' : '选择 PDF 文件'}
             </button>
             <div className="phase-checks">
               <span>
@@ -681,9 +694,13 @@ export function ReadingView({
         <h3>{selectedDocument?.title ?? '尚未选择'}</h3>
         <p>
           {selectedDocument?.isRemoved
-            ? '这篇来源已从正常阅读列表移除；因为保留了卡片，管理副本和原文定位仍可使用。'
-            : selectedDocument?.filePath
+            ? selectedDocument.fileAvailable
+              ? '这篇来源已从正常阅读列表移除；因为保留了卡片，管理副本和原文定位仍可使用。'
+              : '这篇来源已从正常阅读列表移除，且 PDF 管理副本缺失；卡片和定位数据仍已保留。'
+            : selectedDocument?.fileAvailable
             ? '在 PDF 中选择文字即可建立可追溯的研究卡片；高亮和下划线只写入本地数据库。'
+            : selectedDocument?.filePath
+            ? '数据库记录的 PDF 管理副本在本机不可用；研究数据已保留，可重新链接 PDF。'
             : '这篇文献还没有连接 PDF。'}
         </p>
         {selectedDocument ? (
@@ -691,7 +708,7 @@ export function ReadingView({
             <button className="button secondary small" type="button" onClick={() => beginEditDocument(selectedDocument)}>
               <FilePenLine size={14} /> 编辑书目信息
             </button>
-            {selectedDocument.filePath ? (
+            {selectedDocument.fileAvailable ? (
               <button className="button secondary small" type="button" onClick={() => void revealDocument()}>
                 <FolderOpen size={14} /> 打开所在位置
               </button>
@@ -715,11 +732,17 @@ export function ReadingView({
         <dl className="inspector-list">
           <div>
             <dt>文件状态</dt>
-            <dd>{selectedDocument?.filePath ? '已连接 · 只读副本' : '等待导入'}</dd>
+            <dd>
+              {selectedDocument?.fileAvailable
+                ? '已连接 · 只读副本'
+                : selectedDocument?.filePath
+                ? 'PDF 缺失 · 等待重新链接'
+                : '等待导入'}
+            </dd>
           </div>
           {selectedDocument?.filePath ? (
             <div>
-              <dt>管理副本</dt>
+              <dt>{selectedDocument.fileAvailable ? '管理副本' : '原记录路径'}</dt>
               <dd title={selectedDocument.filePath}>{selectedDocument.filePath}</dd>
             </div>
           ) : null}
@@ -869,7 +892,7 @@ export function ReadingView({
           </section>
         ) : null}
 
-        {selectedDocument?.filePath ? (
+        {selectedDocument?.fileAvailable ? (
           <div className="boundary-note">
             <strong>当前能力边界</strong>
             <span>支持文字型 PDF 的渲染、选择、高亮、下划线和定位。扫描件目前只显示页面，OCR 将在后续阶段接入。</span>

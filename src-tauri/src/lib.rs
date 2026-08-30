@@ -17,10 +17,18 @@ pub fn run() {
         .setup(|app| {
             let app_data_directory = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_directory)?;
-            let repository = Repository::open(&app_data_directory.join("inkstone.db"))?;
+            let database_path = app_data_directory.join("inkstone.db");
+            let repository = Repository::open(&database_path)?;
+            let backup_directory = app_data_directory.join("backups");
+            fs::create_dir_all(&backup_directory)?;
             let pdf_library_directory = app_data_directory.join("pdf-library");
             fs::create_dir_all(&pdf_library_directory)?;
-            app.manage(AppState::new(repository, pdf_library_directory));
+            app.manage(AppState::new(
+                repository,
+                database_path,
+                backup_directory,
+                pdf_library_directory,
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -31,6 +39,8 @@ pub fn run() {
             commands::remove_document,
             commands::restore_document,
             commands::import_pdf,
+            commands::export_database,
+            commands::import_database,
             commands::read_pdf,
             commands::reveal_pdf_in_file_manager,
             commands::create_card_from_selection,

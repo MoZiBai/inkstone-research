@@ -2,6 +2,8 @@ import {
   BookOpen,
   Boxes,
   Database,
+  DatabaseBackup,
+  Download,
   FileStack,
   FolderKanban,
   Library,
@@ -10,11 +12,14 @@ import {
   PanelLeftOpen,
   Plus,
   ScrollText,
-  Sparkles
+  ShieldCheck,
+  Sparkles,
+  Upload
 } from 'lucide-react'
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { WorkspaceSnapshot } from '@shared/types'
-import { Modal } from './components/Modal'
+import type { DatabaseImportResult, WorkspaceSnapshot } from '@shared/types'
+import { ConfirmDialog, Modal } from './components/Modal'
 import { LibraryView } from './features/library/LibraryView'
 import { OutlineView } from './features/outline/OutlineView'
 import { ReadingView, type ReadingFocusRequest } from './features/reading/ReadingView'
@@ -46,6 +51,10 @@ export default function App(): React.JSX.Element {
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [showProjectDialog, setShowProjectDialog] = useState(false)
+  const [showDatabaseDialog, setShowDatabaseDialog] = useState(false)
+  const [databaseBusy, setDatabaseBusy] = useState(false)
+  const [pendingDatabaseImport, setPendingDatabaseImport] = useState<string | null>(null)
+  const [databaseImportResult, setDatabaseImportResult] = useState<DatabaseImportResult | null>(null)
   const [focusCardId, setFocusCardId] = useState<string | null>(null)
   const [synthesisMode, setSynthesisMode] = useState<'active' | 'excluded'>('active')
   const [readingRequest, setReadingRequest] = useState<ReadingFocusRequest | null>(null)
@@ -125,6 +134,58 @@ export default function App(): React.JSX.Element {
     const locator = page ? parsePdfLocator(locatorJson, page) : null
     setReadingRequest({ token, documentId, page, locator })
     setActiveView('reading')
+  }
+
+  const exportDatabase = async (): Promise<void> => {
+    try {
+      const destination = await saveDialog({
+        title: '导出砚台数据库备份',
+        defaultPath: databaseBackupFileName(),
+        filters: [{ name: '砚台数据库备份', extensions: ['db'] }]
+      })
+      if (typeof destination !== 'string') return
+      setDatabaseBusy(true)
+      await api.exportDatabase(destination)
+      notify('完整数据库备份已导出。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setDatabaseBusy(false)
+    }
+  }
+
+  const chooseDatabaseImport = async (): Promise<void> => {
+    try {
+      const source = await openDialog({
+        title: '选择砚台数据库备份',
+        multiple: false,
+        directory: false,
+        filters: [{ name: '砚台数据库备份', extensions: ['db'] }]
+      })
+      if (typeof source === 'string') setPendingDatabaseImport(source)
+    } catch (error) {
+      notify(normalizeError(error))
+    }
+  }
+
+  const importDatabase = async (): Promise<void> => {
+    if (!pendingDatabaseImport) return
+    const resultHolder: { value: DatabaseImportResult | null } = { value: null }
+    setDatabaseBusy(true)
+    const succeeded = await runMutation(
+      async () => {
+        resultHolder.value = await api.importDatabase(pendingDatabaseImport)
+      },
+      '数据库备份已导入，项目状态已重新载入。'
+    )
+    setDatabaseBusy(false)
+    if (succeeded && resultHolder.value) {
+      setDatabaseImportResult(resultHolder.value)
+      setPendingDatabaseImport(null)
+      setShowDatabaseDialog(false)
+      setReadingRequest(null)
+      setFocusCardId(null)
+    }
   }
 
   if (initialLoading) {
@@ -231,6 +292,13 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
           <div className="topbar-tools">
+            <button
+              className="topbar-database-button"
+              type="button"
+              onClick={() => setShowDatabaseDialog(true)}
+            >
+              <DatabaseBackup size={14} /> 备份与恢复
+            </button>
             <span className="local-badge">
               <Sparkles size={14} /> 本地优先
             </span>
@@ -317,12 +385,117 @@ export default function App(): React.JSX.Element {
         />
       ) : null}
 
+      {showDatabaseDialog ? (
+        <DatabaseTransferDialog
+          busy={databaseBusy || mutating}
+          onExport={() => void exportDatabase()}
+          onImport={() => void chooseDatabaseImport()}
+          onClose={() => setShowDatabaseDialog(false)}
+        />
+      ) : null}
+
+      {pendingDatabaseImport ? (
+        <ConfirmDialog
+          title="导入并替换当前数据库？"
+          description={`即将导入“${fileName(pendingDatabaseImport)}”。砚台会先自动备份当前数据库；导入文件不会包含 PDF，缺失文献可在阅读台重新链接。`}
+          confirmLabel={databaseBusy ? '正在导入…' : '确认导入'}
+          onConfirm={() => {
+            if (!databaseBusy) void importDatabase()
+          }}
+          onCancel={() => setPendingDatabaseImport(null)}
+        />
+      ) : null}
+
+      {databaseImportResult ? (
+        <DatabaseImportResultDialog
+          result={databaseImportResult}
+          onClose={() => setDatabaseImportResult(null)}
+        />
+      ) : null}
+
       <div className={`toast ${toast ? 'show' : ''}`} role="status">
         <span className="toast-mark">✓</span>
         <span>{toast}</span>
       </div>
       {mutating ? <div className="mutation-line" /> : null}
     </div>
+  )
+}
+
+interface DatabaseTransferDialogProps {
+  busy: boolean
+  onExport: () => void
+  onImport: () => void
+  onClose: () => void
+}
+
+function DatabaseTransferDialog({
+  busy,
+  onExport,
+  onImport,
+  onClose
+}: DatabaseTransferDialogProps): React.JSX.Element {
+  return (
+    <Modal
+      title="数据库备份与恢复"
+      subtitle="备份包含全部研究数据；PDF 管理副本不打包，可在恢复后重新链接。"
+      onClose={onClose}
+      width="large"
+    >
+      <div className="database-transfer-options">
+        <button type="button" disabled={busy} onClick={onExport}>
+          <span className="database-transfer-icon"><Download size={20} /></span>
+          <span>
+            <strong>导出完整数据库</strong>
+            <small>保存项目、卡片、标注、阅读笔记、二次整理和论文提纲。</small>
+          </span>
+        </button>
+        <button type="button" disabled={busy} onClick={onImport}>
+          <span className="database-transfer-icon"><Upload size={20} /></span>
+          <span>
+            <strong>导入数据库备份</strong>
+            <small>验证备份后替换当前资料库，并先自动保存当前数据库。</small>
+          </span>
+        </button>
+      </div>
+      <div className="database-transfer-note">
+        <ShieldCheck size={16} />
+        <span>导出使用 SQLite 一致性快照；导入前会检查文件完整性与数据关联。</span>
+      </div>
+    </Modal>
+  )
+}
+
+function DatabaseImportResultDialog({
+  result,
+  onClose
+}: {
+  result: DatabaseImportResult
+  onClose: () => void
+}): React.JSX.Element {
+  return (
+    <Modal title="数据库恢复完成" onClose={onClose} width="medium">
+      <div className="database-import-result">
+        <ShieldCheck size={28} />
+        <p>卡片、标注、阅读笔记、二次整理和提纲结构已从备份恢复。</p>
+        <dl>
+          <div>
+            <dt>缺失 PDF</dt>
+            <dd>{result.missingPdfCount} 篇</dd>
+          </div>
+          <div>
+            <dt>导入前自动备份</dt>
+            <dd title={result.safetyBackupPath}>{result.safetyBackupPath}</dd>
+          </div>
+        </dl>
+        {result.missingPdfCount > 0 ? (
+          <p className="database-import-warning">请在阅读台选择缺失文献，并使用“重新链接 PDF”。</p>
+        ) : null}
+      </div>
+      <div className="modal-actions">
+        <button className="button primary" type="button" onClick={onClose}>知道了</button>
+      </div>
+    </Modal>
   )
 }
 
@@ -403,4 +576,14 @@ function loadSidebarCollapsed(): boolean {
   } catch {
     return false
   }
+}
+
+function databaseBackupFileName(): string {
+  const date = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `砚台数据库备份-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.db`
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path
 }

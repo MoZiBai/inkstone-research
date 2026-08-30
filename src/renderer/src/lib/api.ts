@@ -7,6 +7,7 @@ import type {
   CreatePdfAnnotationInput,
   CreateProjectInput,
   CreateReadingNoteInput,
+  DatabaseImportResult,
   ImportPdfInput,
   ImportPdfResult,
   InkstoneApi,
@@ -34,6 +35,10 @@ export const api: InkstoneApi = {
     invoke<void>('restore_document', { projectId, documentId }),
   importPdf: (input: ImportPdfInput) =>
     invoke<ImportPdfResult>('import_pdf', { input }),
+  exportDatabase: (destinationPath: string) =>
+    invoke<string>('export_database', { destinationPath }),
+  importDatabase: (sourcePath: string) =>
+    invoke<DatabaseImportResult>('import_database', { sourcePath }),
   readPdf: (documentId: string) => invoke<ArrayBuffer>('read_pdf', { documentId }),
   revealPdfInFileManager: (documentId: string) =>
     invoke<void>('reveal_pdf_in_file_manager', { documentId }),

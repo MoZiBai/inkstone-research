@@ -518,6 +518,27 @@ select:focus-visible {
   gap: 13px;
 }
 
+.topbar-database-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--ink-600);
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.topbar-database-button:hover {
+  color: var(--terracotta-dark);
+  border-color: rgba(164, 95, 69, 0.28);
+  background: #fffaf4;
+}
+
 .local-badge {
   display: inline-flex;
   align-items: center;
@@ -528,6 +549,138 @@ select:focus-visible {
   font-weight: 700;
   border-radius: 8px;
   background: var(--sage-soft);
+}
+
+.database-transfer-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.database-transfer-options > button {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+  padding: 17px;
+  color: var(--ink-700);
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.68);
+  transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+}
+
+.database-transfer-options > button:hover:not(:disabled) {
+  border-color: rgba(164, 95, 69, 0.3);
+  background: #fffaf4;
+  transform: translateY(-1px);
+}
+
+.database-transfer-options > button > span:last-child {
+  display: grid;
+  gap: 6px;
+}
+
+.database-transfer-options strong {
+  color: var(--ink-800);
+  font-family: var(--serif);
+  font-size: 15px;
+}
+
+.database-transfer-options small {
+  color: var(--ink-600);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.database-transfer-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: var(--terracotta-dark);
+  border-radius: 10px;
+  background: var(--terracotta-soft);
+}
+
+.database-transfer-options > button:last-child .database-transfer-icon {
+  color: var(--sage);
+  background: var(--sage-soft);
+}
+
+.database-transfer-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 13px;
+  padding: 10px 12px;
+  color: var(--sage);
+  font-size: 12px;
+  line-height: 1.55;
+  border-radius: 8px;
+  background: var(--sage-soft);
+}
+
+.database-transfer-note svg {
+  flex: 0 0 auto;
+}
+
+.database-import-result {
+  display: grid;
+  justify-items: center;
+  gap: 13px;
+  text-align: center;
+}
+
+.database-import-result > svg {
+  color: var(--sage);
+}
+
+.database-import-result > p {
+  margin: 0;
+  color: var(--ink-600);
+  line-height: 1.7;
+}
+
+.database-import-result dl {
+  display: grid;
+  width: 100%;
+  gap: 7px;
+  margin: 0;
+}
+
+.database-import-result dl > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 10px;
+  text-align: left;
+  border-radius: 7px;
+  background: var(--paper-150);
+}
+
+.database-import-result dt {
+  color: var(--ink-500);
+  font-size: 12px;
+}
+
+.database-import-result dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink-700);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.database-import-result .database-import-warning {
+  width: 100%;
+  padding: 9px 11px;
+  color: var(--terracotta-dark);
+  text-align: left;
+  border-radius: 7px;
+  background: var(--terracotta-soft);
 }
 
 .view-tabs {
