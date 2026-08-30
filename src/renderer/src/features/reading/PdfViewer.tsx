@@ -1,0 +1,746 @@
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Highlighter,
+  LoaderCircle,
+  Maximize2,
+  MousePointer2,
+  Underline,
+  ZoomIn,
+  ZoomOut
+} from 'lucide-react'
+import {
+  getDocument,
+  GlobalWorkerOptions,
+  TextLayer,
+  type PDFDocumentLoadingTask,
+  type PDFDocumentProxy,
+  type PDFPageProxy,
+  type RenderTask
+} from 'pdfjs-dist'
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  DocumentSummary,
+  PdfAnnotation,
+  PdfAnnotationKind,
+  PdfLocator,
+  ProjectCardView
+} from '@shared/types'
+import { api } from '../../lib/api'
+import type { Notify } from '../../types'
+import { buildContext, locatorFromRange, parsePdfLocator, type PdfSelection } from './pdfLocator'
+
+GlobalWorkerOptions.workerSrc = workerUrl
+
+interface PdfViewerProps {
+  document: DocumentSummary
+  annotations: PdfAnnotation[]
+  cards: ProjectCardView[]
+  focusToken: number
+  focusPage: number | null
+  focusLocator: PdfLocator | null
+  onCreateCard: (selection: PdfSelection) => void
+  onCreateAnnotation: (selection: PdfSelection, kind: PdfAnnotationKind) => void
+  onCreateReadingNote: (selection: PdfSelection, kind: 'insight' | 'critique') => void
+  onNotify: Notify
+}
+
+interface PageInfo {
+  pageNumber: number
+  width: number
+  height: number
+}
+
+interface ToolbarPosition {
+  left: number
+  top: number
+}
+
+export function PdfViewer({
+  document,
+  annotations,
+  cards,
+  focusToken,
+  focusPage,
+  focusLocator,
+  onCreateCard,
+  onCreateAnnotation,
+  onCreateReadingNote,
+  onNotify
+}: PdfViewerProps): React.JSX.Element {
+  const stageRef = useRef<HTMLDivElement>(null)
+  const pageRefs = useRef(new Map<number, HTMLDivElement>())
+  const pageRefCallbacks = useRef(
+    new Map<number, (element: HTMLDivElement | null) => void>()
+  )
+  const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
+  const pdfRef = useRef<PDFDocumentProxy | null>(null)
+  const fitAppliedRef = useRef(false)
+  const focusHandledRef = useRef(0)
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
+  const [pages, setPages] = useState<PageInfo[]>([])
+  const [numPages, setNumPages] = useState(0)
+  const [scale, setScale] = useState(1)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [visiblePages, setVisiblePages] = useState<Set<number>>(() => new Set([1, 2]))
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [loadError, setLoadError] = useState('')
+  const [selection, setSelection] = useState<PdfSelection | null>(null)
+  const [toolbarPosition, setToolbarPosition] = useState<ToolbarPosition | null>(null)
+
+  const clearSelection = useCallback((): void => {
+    setSelection(null)
+    setToolbarPosition(null)
+    window.getSelection()?.removeAllRanges()
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    let loadingTask: PDFDocumentLoadingTask | null = null
+    let loadedPdf: PDFDocumentProxy | null = null
+    fitAppliedRef.current = false
+    focusHandledRef.current = 0
+    setPdf(null)
+    setPages([])
+    pageRefs.current.clear()
+    setNumPages(0)
+    setCurrentPage(1)
+    setVisiblePages(new Set([1, 2]))
+    setSelection(null)
+    setToolbarPosition(null)
+    setLoadState('loading')
+    setLoadError('')
+
+    const load = async (): Promise<void> => {
+      try {
+        const buffer = await api.readPdf(document.id)
+        if (cancelled) return
+        const data = new Uint8Array(buffer)
+        loadingTask = getDocument({ data })
+        loadingTaskRef.current = loadingTask
+        loadedPdf = await loadingTask.promise
+        if (cancelled) {
+          await loadedPdf.cleanup()
+          return
+        }
+        pdfRef.current = loadedPdf
+        setPdf(loadedPdf)
+        setNumPages(loadedPdf.numPages)
+
+        // The first page is enough to show the reader. Use its dimensions as a
+        // temporary estimate for the remaining pages, then refine those sizes
+        // in small batches in the background. A large monograph should not
+        // remain blank while every page is being inspected serially.
+        const firstPage = await loadedPdf.getPage(1)
+        const firstViewport = firstPage.getViewport({ scale: 1 })
+        const estimatedSize = {
+          width: firstViewport.width,
+          height: firstViewport.height
+        }
+        firstPage.cleanup()
+        const initialPages = Array.from({ length: loadedPdf.numPages }, (_, index) => ({
+          pageNumber: index + 1,
+          ...estimatedSize
+        }))
+        if (cancelled) return
+        setPages(initialPages)
+        setVisiblePages(new Set([1, 2].filter((page) => page <= loadedPdf!.numPages)))
+        setLoadState('ready')
+
+        const pageDocument = loadedPdf
+        const batchSize = 4
+        for (let start = 2; start <= pageDocument.numPages; start += batchSize) {
+          if (cancelled) return
+          const pageNumbers = Array.from(
+            { length: Math.min(batchSize, pageDocument.numPages - start + 1) },
+            (_, index) => start + index
+          )
+          const batch = await Promise.all(
+            pageNumbers.map(async (pageNumber): Promise<PageInfo | null> => {
+              let page: PDFPageProxy | null = null
+              try {
+                page = await pageDocument.getPage(pageNumber)
+                const viewport = page.getViewport({ scale: 1 })
+                return {
+                  pageNumber,
+                  width: viewport.width,
+                  height: viewport.height
+                }
+              } catch {
+                // Keep the estimated page size if one page has a recoverable
+                // metadata error; the page renderer will report a more useful
+                // error if the user scrolls to it.
+                return null
+              } finally {
+                page?.cleanup()
+              }
+            })
+          )
+          if (cancelled) return
+          const refined = new Map(
+            batch
+              .filter((page): page is PageInfo => page !== null)
+              .map((page) => [page.pageNumber, page] as const)
+          )
+          if (refined.size > 0) {
+            setPages((current) => current.map((page) => refined.get(page.pageNumber) ?? page))
+          }
+          // Yield between batches so scrolling and selection remain responsive.
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+        }
+      } catch (error) {
+        if (cancelled) return
+        setLoadState('error')
+        setLoadError(normalizePdfError(error))
+      }
+    }
+
+    void load()
+    return () => {
+      cancelled = true
+      loadingTaskRef.current = null
+      if (loadingTask) void loadingTask.destroy()
+      if (loadedPdf) void loadedPdf.cleanup()
+      pdfRef.current = null
+    }
+  }, [document.id])
+
+  useEffect(() => {
+    const root = stageRef.current
+    if (!root || pages.length === 0) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let mostVisible: { page: number; ratio: number } | null = null
+        for (const entry of entries) {
+          const pageNumber = Number((entry.target as HTMLElement).dataset.pageNumber)
+          if (!Number.isInteger(pageNumber) || !entry.isIntersecting) continue
+          if (!mostVisible || entry.intersectionRatio > mostVisible.ratio) {
+            mostVisible = { page: pageNumber, ratio: entry.intersectionRatio }
+          }
+        }
+        setVisiblePages((current) => {
+          const next = new Set(current)
+          for (const entry of entries) {
+            const pageNumber = Number((entry.target as HTMLElement).dataset.pageNumber)
+            if (!Number.isInteger(pageNumber)) continue
+            if (entry.isIntersecting) next.add(pageNumber)
+            else next.delete(pageNumber)
+          }
+          return next
+        })
+        if (mostVisible !== null) setCurrentPage(mostVisible.page)
+      },
+      { root, rootMargin: '900px 0px', threshold: [0, 0.1, 0.5, 0.9] }
+    )
+
+    for (const element of pageRefs.current.values()) observer.observe(element)
+    return () => observer.disconnect()
+  }, [document.id, pages.length, scale])
+
+  const firstPageWidth = pages[0]?.width ?? 0
+  const fitToWidth = useCallback((): void => {
+    const root = stageRef.current
+    if (!firstPageWidth || !root) return
+    const availableWidth = Math.max(240, root.clientWidth - 64)
+    setScale(clampScale(availableWidth / firstPageWidth))
+    fitAppliedRef.current = true
+  }, [firstPageWidth])
+
+  useEffect(() => {
+    if (pages.length === 0 || fitAppliedRef.current) return
+    const root = stageRef.current
+    if (!root) return
+    const fit = (): void => {
+      if (root.clientWidth > 0) fitToWidth()
+    }
+    fit()
+    const observer = new ResizeObserver(fit)
+    observer.observe(root)
+    return () => observer.disconnect()
+  }, [fitToWidth, pages.length])
+
+  const scrollToPage = useCallback((pageNumber: number, locator?: PdfLocator | null): void => {
+    const root = stageRef.current
+    const pageElement = pageRefs.current.get(pageNumber)
+    if (!root || !pageElement) return
+    setCurrentPage(pageNumber)
+    const rootRect = root.getBoundingClientRect()
+    const pageRect = pageElement.getBoundingClientRect()
+    const offset = locator?.rects[0]?.y
+      ? locator.rects[0].y * pageRect.height
+      : 0
+    const top = root.scrollTop + pageRect.top - rootRect.top + offset - 72
+    root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  }, [])
+
+  useEffect(() => {
+    if (!focusToken || focusToken === focusHandledRef.current || pages.length === 0) return
+    if (!focusPage || focusPage < 1 || focusPage > pages.length) return
+    focusHandledRef.current = focusToken
+    const timeout = window.setTimeout(() => scrollToPage(focusPage, focusLocator), 80)
+    return () => window.clearTimeout(timeout)
+  }, [focusLocator, focusPage, focusToken, pages.length, scrollToPage])
+
+  const handleSelection = useCallback(
+    (pageNumber: number, pageElement: HTMLDivElement): void => {
+      window.requestAnimationFrame(() => {
+        const browserSelection = window.getSelection()
+        if (!browserSelection || browserSelection.rangeCount === 0 || browserSelection.isCollapsed) {
+          return
+        }
+        const range = browserSelection.getRangeAt(0)
+        const selectedText = browserSelection.toString()
+        if (!selectedText.trim()) return
+
+        const rangeRects = Array.from(range.getClientRects())
+        const touchedPages = Array.from(pageRefs.current.entries()).filter(([, candidate]) => {
+          const candidateRect = candidate.getBoundingClientRect()
+          return rangeRects.some((rect) => rectanglesOverlap(rect, candidateRect))
+        })
+        if (touchedPages.length > 1) {
+          onNotify('暂只支持在同一页内创建摘录或批注，请分开选择。')
+          clearSelection()
+          return
+        }
+        const locator = locatorFromRange(range, pageElement, pageNumber)
+        if (!locator) {
+          onNotify('没有取得有效的文字位置，请重新选择文字。')
+          return
+        }
+        const textLayer = pageElement.querySelector<HTMLElement>('.textLayer')
+        const context = buildContext(textLayer?.textContent ?? '', selectedText)
+        const clientRect = unionRects(rangeRects)
+        setSelection({
+          pageNumber,
+          text: selectedText,
+          locator,
+          contextBefore: context.before,
+          contextAfter: context.after,
+          clientRect
+        })
+        const toolbarWidth = Math.min(510, window.innerWidth - 24)
+        setToolbarPosition({
+          left: Math.min(
+            window.innerWidth - toolbarWidth - 12,
+            Math.max(12, clientRect.left + clientRect.width / 2 - toolbarWidth / 2)
+          ),
+          top: Math.max(12, clientRect.top - 48)
+        })
+      })
+    },
+    [clearSelection, onNotify]
+  )
+
+  const createCard = (): void => {
+    if (!selection) return
+    onCreateCard(selection)
+    clearSelection()
+  }
+
+  const createAnnotation = (kind: PdfAnnotationKind): void => {
+    if (!selection) return
+    onCreateAnnotation(selection, kind)
+    clearSelection()
+  }
+
+  const createReadingNote = (kind: 'insight' | 'critique'): void => {
+    if (!selection) return
+    onCreateReadingNote(selection, kind)
+    clearSelection()
+  }
+
+  const pageAnnotations = useMemo(() => {
+    const byPage = new Map<number, PdfAnnotation[]>()
+    for (const annotation of annotations) {
+      const current = byPage.get(annotation.pageNumber) ?? []
+      current.push(annotation)
+      byPage.set(annotation.pageNumber, current)
+    }
+    return byPage
+  }, [annotations])
+
+  const cardsByPage = useMemo(() => {
+    const byPage = new Map<number, ProjectCardView[]>()
+    for (const card of cards) {
+      if (card.pdfPage === null) continue
+      const current = byPage.get(card.pdfPage) ?? []
+      current.push(card)
+      byPage.set(card.pdfPage, current)
+    }
+    return byPage
+  }, [cards])
+
+  const pageRefFor = useCallback((pageNumber: number) => {
+    const existing = pageRefCallbacks.current.get(pageNumber)
+    if (existing) return existing
+    const callback = (element: HTMLDivElement | null): void => {
+      if (element) pageRefs.current.set(pageNumber, element)
+      else pageRefs.current.delete(pageNumber)
+    }
+    pageRefCallbacks.current.set(pageNumber, callback)
+    return callback
+  }, [])
+
+  if (loadState === 'loading') {
+    return (
+      <div className="pdf-viewer-state">
+        <LoaderCircle className="spin" size={24} />
+        <strong>正在打开 PDF</strong>
+        <span>只在需要时渲染页面，文字层随后加载。</span>
+      </div>
+    )
+  }
+
+  if (loadState === 'error') {
+    return (
+      <div className="pdf-viewer-state error">
+        <AlertTriangle size={24} />
+        <strong>PDF 无法打开</strong>
+        <span>{loadError || '文件可能已损坏，或暂不支持该加密方式。'}</span>
+      </div>
+    )
+  }
+
+  if (!pdf || pages.length === 0) {
+    return (
+      <div className="pdf-viewer-state">
+        <LoaderCircle className="spin" size={24} />
+        <strong>正在准备页面</strong>
+      </div>
+    )
+  }
+
+  return (
+    <div className="pdf-viewer">
+      <div className="pdf-toolbar" role="toolbar" aria-label="PDF 阅读工具">
+        <div className="pdf-toolbar-group">
+          <button
+            className="pdf-tool-button"
+            type="button"
+            onClick={() => scrollToPage(Math.max(1, currentPage - 1))}
+            disabled={currentPage <= 1}
+            aria-label="上一页"
+            title="上一页"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <label className="pdf-page-input">
+            <span className="sr-only">当前页</span>
+            <input
+              type="number"
+              min={1}
+              max={numPages}
+              value={currentPage}
+              onChange={(event) => {
+                const next = Number(event.target.value)
+                if (Number.isInteger(next)) setCurrentPage(Math.min(numPages, Math.max(1, next)))
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') scrollToPage(currentPage)
+              }}
+              onBlur={() => scrollToPage(currentPage)}
+            />
+            <span>/ {numPages}</span>
+          </label>
+          <button
+            className="pdf-tool-button"
+            type="button"
+            onClick={() => scrollToPage(Math.min(numPages, currentPage + 1))}
+            disabled={currentPage >= numPages}
+            aria-label="下一页"
+            title="下一页"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+        <div className="pdf-toolbar-divider" />
+        <div className="pdf-toolbar-group">
+          <button
+            className="pdf-tool-button"
+            type="button"
+            onClick={() => setScale((value) => clampScale(value - 0.1))}
+            aria-label="缩小"
+            title="缩小"
+          >
+            <ZoomOut size={15} />
+          </button>
+          <span className="pdf-zoom-value">{Math.round(scale * 100)}%</span>
+          <button
+            className="pdf-tool-button"
+            type="button"
+            onClick={() => setScale((value) => clampScale(value + 0.1))}
+            aria-label="放大"
+            title="放大"
+          >
+            <ZoomIn size={15} />
+          </button>
+          <button className="pdf-tool-button text-tool" type="button" onClick={fitToWidth} title="适合宽度">
+            <Maximize2 size={14} />
+            <span>适合宽度</span>
+          </button>
+        </div>
+        <div className="pdf-toolbar-hint">
+          <MousePointer2 size={14} /> 选中文字后可摘录、划线或高亮
+        </div>
+      </div>
+
+      <div
+        className="pdf-scroll"
+        ref={stageRef}
+        onScroll={() => {
+          if (selection) clearSelection()
+        }}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) clearSelection()
+        }}
+      >
+        <div className="pdf-page-stack">
+          {pages.map((pageInfo) => (
+            <PdfPageView
+              key={pageInfo.pageNumber}
+              pageInfo={pageInfo}
+              pdf={pdf}
+              scale={scale}
+              visible={visiblePages.has(pageInfo.pageNumber)}
+              annotations={pageAnnotations.get(pageInfo.pageNumber) ?? []}
+              cards={cardsByPage.get(pageInfo.pageNumber) ?? []}
+              onSelection={handleSelection}
+              pageRef={pageRefFor(pageInfo.pageNumber)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {selection && toolbarPosition ? (
+        <div
+          className="pdf-selection-toolbar"
+          style={{ left: toolbarPosition.left, top: toolbarPosition.top }}
+          onMouseDown={(event) => event.preventDefault()}
+          role="toolbar"
+          aria-label="选区操作"
+        >
+          <button type="button" onClick={createCard} title="创建研究卡片">
+            <span className="selection-tool-mark card-mark">卡</span>摘录成卡片
+          </button>
+          <button type="button" onClick={() => createAnnotation('highlight')} title="保存高亮">
+            <Highlighter size={14} />高亮
+          </button>
+          <button type="button" onClick={() => createAnnotation('underline')} title="保存下划线">
+            <Underline size={14} />下划线
+          </button>
+          <button type="button" onClick={() => createReadingNote('insight')} title="记录与原文关联的灵感">
+            <span className="selection-tool-mark insight-mark">灵</span>灵感
+          </button>
+          <button type="button" onClick={() => createReadingNote('critique')} title="记录对原文的质疑">
+            <span className="selection-tool-mark critique-mark">疑</span>质疑
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+interface PdfPageViewProps {
+  pageInfo: PageInfo
+  pdf: PDFDocumentProxy
+  scale: number
+  visible: boolean
+  annotations: PdfAnnotation[]
+  cards: ProjectCardView[]
+  onSelection: (pageNumber: number, pageElement: HTMLDivElement) => void
+  pageRef: (element: HTMLDivElement | null) => void
+}
+
+const PdfPageView = memo(function PdfPageView({
+  pageInfo,
+  pdf,
+  scale,
+  visible,
+  annotations,
+  cards,
+  onSelection,
+  pageRef
+}: PdfPageViewProps): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const textLayerRef = useRef<HTMLDivElement>(null)
+  const textLayerInstanceRef = useRef<TextLayer | null>(null)
+  const [renderError, setRenderError] = useState<string | null>(null)
+  const pageWidth = pageInfo.width * scale
+  const pageHeight = pageInfo.height * scale
+
+  useEffect(() => {
+    if (!visible) return
+    let cancelled = false
+    let page: PDFPageProxy | null = null
+    let renderTask: RenderTask | null = null
+
+    const render = async (): Promise<void> => {
+      const canvas = canvasRef.current
+      const textLayerContainer = textLayerRef.current
+      if (!canvas || !textLayerContainer) return
+      setRenderError(null)
+      textLayerContainer.replaceChildren()
+      textLayerInstanceRef.current?.cancel()
+      textLayerInstanceRef.current = null
+      try {
+        page = await pdf.getPage(pageInfo.pageNumber)
+        if (cancelled) return
+        const viewport = page.getViewport({ scale })
+        const outputScale = Math.min(window.devicePixelRatio || 1, 2)
+        canvas.width = Math.max(1, Math.floor(viewport.width * outputScale))
+        canvas.height = Math.max(1, Math.floor(viewport.height * outputScale))
+        canvas.style.width = `${viewport.width}px`
+        canvas.style.height = `${viewport.height}px`
+        const context = canvas.getContext('2d', { alpha: false })
+        if (!context) throw new Error('当前环境无法创建画布。')
+        context.save()
+        context.fillStyle = '#ffffff'
+        context.fillRect(0, 0, canvas.width, canvas.height)
+        context.restore()
+        renderTask = page.render({
+          canvasContext: context,
+          canvas,
+          viewport,
+          transform:
+            outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
+        })
+        await renderTask.promise
+        if (cancelled) return
+        const textContent = await page.getTextContent()
+        if (cancelled) return
+        const textLayer = new TextLayer({
+          textContentSource: textContent,
+          container: textLayerContainer,
+          viewport
+        })
+        textLayerInstanceRef.current = textLayer
+        await textLayer.render()
+      } catch (error) {
+        if (!cancelled) setRenderError(normalizePdfError(error))
+      } finally {
+        if (cancelled) {
+          renderTask?.cancel()
+          textLayerInstanceRef.current?.cancel()
+        }
+        page?.cleanup()
+      }
+    }
+
+    void render()
+    return () => {
+      cancelled = true
+      renderTask?.cancel()
+      textLayerInstanceRef.current?.cancel()
+      textLayerInstanceRef.current = null
+      page?.cleanup()
+    }
+  }, [pageInfo.pageNumber, pdf, scale, visible])
+
+  const cardCount = cards.length
+  return (
+    <div
+      className="pdf-page-shell"
+      ref={pageRef}
+      data-page-number={pageInfo.pageNumber}
+      style={{
+        width: pageWidth,
+        height: pageHeight,
+        '--total-scale-factor': scale,
+        '--scale-round-x': '1px',
+        '--scale-round-y': '1px'
+      } as React.CSSProperties}
+      onMouseUp={(event) => {
+        const pageElement = event.currentTarget
+        onSelection(pageInfo.pageNumber, pageElement)
+      }}
+      aria-label={`PDF 第 ${pageInfo.pageNumber} 页`}
+    >
+      {visible ? (
+        <>
+          <canvas ref={canvasRef} className="pdf-page-canvas" aria-hidden="true" />
+          <div ref={textLayerRef} className="textLayer" />
+        </>
+      ) : (
+        <div className="pdf-page-lazy-placeholder">
+          <span>第 {pageInfo.pageNumber} 页</span>
+          <small>滚动到附近后渲染</small>
+        </div>
+      )}
+      <div className="pdf-user-annotation-layer" aria-hidden="true">
+        {annotations.map((annotation) => (
+          <PdfAnnotationOverlay
+            key={annotation.id}
+            annotation={annotation}
+          />
+        ))}
+      </div>
+      {renderError ? (
+        <div className="pdf-page-error">
+          <AlertTriangle size={14} /> {renderError}
+        </div>
+      ) : null}
+      {cardCount > 0 ? <span className="pdf-page-card-count">{cardCount} 张卡片</span> : null}
+    </div>
+  )
+})
+
+interface PdfAnnotationOverlayProps {
+  annotation: PdfAnnotation
+}
+
+function PdfAnnotationOverlay({ annotation }: PdfAnnotationOverlayProps): React.JSX.Element | null {
+  const locator: PdfLocator | null = parsePdfLocator(annotation.locatorJson, annotation.pageNumber)
+  if (!locator) return null
+  return (
+    <>
+      {locator.rects.map((rect, index) => (
+        <span
+          className={`pdf-user-annotation ${annotation.kind}`}
+          key={`${annotation.id}-${index}`}
+          style={{
+            left: `${rect.x * 100}%`,
+            top: `${rect.y * 100}%`,
+            width: `${rect.width * 100}%`,
+            height: `${rect.height * 100}%`,
+            '--annotation-color': annotation.color
+          } as React.CSSProperties}
+          title={
+            annotation.comment ||
+            `${annotation.kind === 'highlight' ? '高亮' : '下划线'}：${annotation.selectedText.slice(0, 120)}`
+          }
+        />
+      ))}
+    </>
+  )
+}
+
+function rectanglesOverlap(first: DOMRect, second: DOMRect): boolean {
+  return (
+    first.right > second.left &&
+    first.left < second.right &&
+    first.bottom > second.top &&
+    first.top < second.bottom
+  )
+}
+
+function unionRects(rects: DOMRect[]): DOMRect {
+  if (rects.length === 0) return new DOMRect(0, 0, 0, 0)
+  const left = Math.min(...rects.map((rect) => rect.left))
+  const top = Math.min(...rects.map((rect) => rect.top))
+  const right = Math.max(...rects.map((rect) => rect.right))
+  const bottom = Math.max(...rects.map((rect) => rect.bottom))
+  return new DOMRect(left, top, right - left, bottom - top)
+}
+
+function clampScale(value: number): number {
+  return Math.round(Math.max(0.55, Math.min(2.5, value)) * 100) / 100
+}
+
+function normalizePdfError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  return '未知 PDF 错误。'
+}

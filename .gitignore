@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+release/
+src-tauri/target/
+coverage/
+.toolchains/
+.pnpm-store/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+Thumbs.db
