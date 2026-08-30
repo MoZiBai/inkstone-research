@@ -6,7 +6,7 @@ export interface PdfSelection {
   locator: PdfLocator
   contextBefore: string
   contextAfter: string
-  clientRect: DOMRect
+  clientRect?: DOMRect
 }
 
 const MAX_CONTEXT_LENGTH = 180

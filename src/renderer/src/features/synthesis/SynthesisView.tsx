@@ -320,7 +320,7 @@ export function SynthesisView({
                           <span>{card.documentAuthors || '未知作者'}</span>
                           <span>第 {card.printPage ?? card.pdfPage ?? '—'} 页</span>
                         </div>
-                        <blockquote>{card.cleanText}</blockquote>
+                        <blockquote>{card.displayText}</blockquote>
                         {card.comment ? <p>{card.comment}</p> : null}
                         <div className="card-meta-row">
                           <span className={`role-pill role-${card.role}`}>{roleLabels[card.role]}</span>
@@ -406,7 +406,7 @@ export function SynthesisView({
                   <span>
                     {card.documentAuthors || '未知作者'} · 第 {card.printPage ?? card.pdfPage ?? '—'} 页
                   </span>
-                  <blockquote>{card.cleanText}</blockquote>
+                  <blockquote>{card.displayText}</blockquote>
                   <p>剔除前分类：{previousCategory?.name ?? '待归类'}</p>
                 </div>
                 <button

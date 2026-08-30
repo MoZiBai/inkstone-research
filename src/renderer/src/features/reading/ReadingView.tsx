@@ -43,6 +43,7 @@ import {
 } from './bibliographyParser'
 import { titleAfterPdfSelection } from './pdfImportDraft'
 import { parsePdfLocator, type PdfSelection } from './pdfLocator'
+import { selectionFromReadingNote } from './readingNoteCardDraft'
 import {
   adjustReadingPanel,
   DEFAULT_READING_PANEL_WIDTHS,
@@ -120,7 +121,10 @@ export function ReadingView({
   const [importTargetDocumentId, setImportTargetDocumentId] = useState<string | null>(null)
   const [importSourcePath, setImportSourcePath] = useState<string | null>(null)
   const [metadata, setMetadata] = useState<MetadataDraft>(EMPTY_METADATA)
-  const [pendingSelection, setPendingSelection] = useState<PdfSelection | null>(null)
+  const [pendingCard, setPendingCard] = useState<{
+    selection: PdfSelection
+    initialComment: string
+  } | null>(null)
   const [editingDocument, setEditingDocument] = useState<DocumentSummary | null>(null)
   const [removingDocument, setRemovingDocument] = useState<DocumentSummary | null>(null)
   const [showRemovedDocuments, setShowRemovedDocuments] = useState(false)
@@ -415,23 +419,31 @@ export function ReadingView({
 
   const createCard = async (selection: PdfSelection): Promise<void> => {
     if (!snapshot.currentProjectId || !selectedDocument) return
-    setPendingSelection(selection)
+    setPendingCard({ selection, initialComment: '' })
+  }
+
+  const createCardFromReadingNote = (note: ReadingNote): void => {
+    const selection = selectionFromReadingNote(note)
+    if (!selection) return
+    setPendingCard({ selection, initialComment: note.content })
   }
 
   const saveCardFromSelection = async (input: {
+    displayText: string
     comment: string
     role: CardRole
     tags: string[]
     printPage: string
   }): Promise<void> => {
-    if (!pendingSelection || !snapshot.currentProjectId || !selectedDocument) return
-    const selection = pendingSelection
+    if (!pendingCard || !snapshot.currentProjectId || !selectedDocument) return
+    const selection = pendingCard.selection
     const succeeded = await runMutation(
       () =>
         api.createCardFromSelection({
           projectId: snapshot.currentProjectId as string,
           documentId: selectedDocument.id,
           rawText: selection.text,
+          displayText: input.displayText,
           pdfPage: selection.pageNumber,
           printPage: input.printPage.trim() || null,
           locatorJson: JSON.stringify(selection.locator),
@@ -443,7 +455,7 @@ export function ReadingView({
         }),
       '研究卡片和对应高亮已创建，并放入“待归类”。'
     )
-    if (succeeded) setPendingSelection(null)
+    if (succeeded) setPendingCard(null)
   }
 
   const createAnnotation = async (
@@ -774,9 +786,21 @@ export function ReadingView({
                         </small>
                       </span>
                     </button>
-                    <button className="annotation-delete" type="button" aria-label="删除阅读笔记" onClick={() => setDeletingNote(note)}>
-                      <Trash2 size={13} />
-                    </button>
+                    <div className="reading-note-item-actions">
+                      {selectionFromReadingNote(note) ? (
+                        <button
+                          className="reading-note-convert"
+                          type="button"
+                          title="使用现有制卡流程；转换后保留本笔记"
+                          onClick={() => createCardFromReadingNote(note)}
+                        >
+                          <FilePlus2 size={12} /> 转为卡片
+                        </button>
+                      ) : null}
+                      <button className="annotation-delete" type="button" aria-label="删除阅读笔记" onClick={() => setDeletingNote(note)}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -800,7 +824,7 @@ export function ReadingView({
                 >
                   <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
                   <span>
-                    <strong>{card.cleanText}</strong>
+                    <strong>{card.displayText}</strong>
                     <small>{card.comment || '点击回到原文位置'}</small>
                   </span>
                 </button>
@@ -911,11 +935,12 @@ export function ReadingView({
         </Modal>
       ) : null}
 
-      {pendingSelection ? (
+      {pendingCard ? (
         <CreateCardDialog
-          selection={pendingSelection}
+          selection={pendingCard.selection}
+          initialComment={pendingCard.initialComment}
           onSave={saveCardFromSelection}
-          onClose={() => setPendingSelection(null)}
+          onClose={() => setPendingCard(null)}
         />
       ) : null}
 
@@ -1287,12 +1312,14 @@ function ReadingNoteDialog({ kind, selection, onSave, onClose }: ReadingNoteDial
 
 interface CreateCardDialogProps {
   selection: PdfSelection
-  onSave: (input: { comment: string; role: CardRole; tags: string[]; printPage: string }) => Promise<void>
+  initialComment: string
+  onSave: (input: { displayText: string; comment: string; role: CardRole; tags: string[]; printPage: string }) => Promise<void>
   onClose: () => void
 }
 
-function CreateCardDialog({ selection, onSave, onClose }: CreateCardDialogProps): React.JSX.Element {
-  const [comment, setComment] = useState('')
+function CreateCardDialog({ selection, initialComment, onSave, onClose }: CreateCardDialogProps): React.JSX.Element {
+  const [displayText, setDisplayText] = useState(selection.text)
+  const [comment, setComment] = useState(initialComment)
   const [role, setRole] = useState<CardRole>('unset')
   const [tags, setTags] = useState('')
   const [printPage, setPrintPage] = useState('')
@@ -1303,6 +1330,7 @@ function CreateCardDialog({ selection, onSave, onClose }: CreateCardDialogProps)
     setSaving(true)
     try {
       await onSave({
+        displayText,
         comment,
         role,
         printPage,
@@ -1324,7 +1352,24 @@ function CreateCardDialog({ selection, onSave, onClose }: CreateCardDialogProps)
       width="large"
     >
       <form onSubmit={(event) => void submit(event)}>
-        <blockquote className="dialog-quote">{selection.text}</blockquote>
+        <label className="field excerpt-text-editor">
+          <span>卡片摘录文字 <small>可修正 OCR 识别结果</small></span>
+          <textarea
+            autoFocus
+            required
+            rows={5}
+            maxLength={50_000}
+            value={displayText}
+            onChange={(event) => setDisplayText(event.target.value)}
+          />
+          <small>这里只调整卡片显示文字；PDF 原始选区、页码、高亮和定位不会改变。</small>
+        </label>
+        {displayText !== selection.text ? (
+          <details className="original-selection-details">
+            <summary>查看未修改的 PDF 选区文字</summary>
+            <blockquote className="dialog-quote compact">{selection.text}</blockquote>
+          </details>
+        ) : null}
         <div className="source-context">
           <div>
             <span>前文</span>

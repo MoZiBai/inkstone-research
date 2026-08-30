@@ -211,6 +211,15 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", 4)?;
     }
+
+    if current_version < 5 {
+        connection.execute_batch(
+            r#"
+            ALTER TABLE project_cards ADD COLUMN text_override TEXT NOT NULL DEFAULT '';
+            "#,
+        )?;
+        connection.pragma_update(None, "user_version", 5)?;
+    }
     Ok(())
 }
 

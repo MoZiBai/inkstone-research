@@ -51,7 +51,7 @@ export function LibraryView({
     if (!deferredQuery) return snapshot.cards
     return snapshot.cards.filter((card) =>
       [
-        card.cleanText,
+        card.displayText,
         card.comment,
         card.documentTitle,
         card.documentAuthors,
@@ -190,11 +190,11 @@ export function LibraryView({
                           <span className={`role-pill role-${card.role}`}>
                             {roleLabels[card.role]}
                           </span>
-                          {card.rawText !== card.cleanText ? (
+                          {card.rawText !== card.displayText ? (
                             <span className="soft-pill">保留原始版本</span>
                           ) : null}
                         </div>
-                        <blockquote>{card.cleanText}</blockquote>
+                        <blockquote>{card.displayText}</blockquote>
                         {card.comment ? <p className="research-comment">{card.comment}</p> : null}
                         <div className="tag-list">
                           {card.tags.map((tag) => (

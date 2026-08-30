@@ -31,6 +31,7 @@ import type {
 import { api } from '../../lib/api'
 import type { Notify } from '../../types'
 import { buildContext, locatorFromRange, parsePdfLocator, type PdfSelection } from './pdfLocator'
+import { clampPdfScale, scaleFromCtrlWheel } from './pdfZoom'
 
 GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -77,7 +78,9 @@ export function PdfViewer({
   )
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const pdfRef = useRef<PDFDocumentProxy | null>(null)
-  const fitAppliedRef = useRef(false)
+  const fitModeRef = useRef(true)
+  const scaleRef = useRef(1)
+  const zoomFrameRef = useRef<number | null>(null)
   const focusHandledRef = useRef(0)
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [pages, setPages] = useState<PageInfo[]>([])
@@ -100,13 +103,15 @@ export function PdfViewer({
     let cancelled = false
     let loadingTask: PDFDocumentLoadingTask | null = null
     let loadedPdf: PDFDocumentProxy | null = null
-    fitAppliedRef.current = false
+    fitModeRef.current = true
+    scaleRef.current = 1
     focusHandledRef.current = 0
     setPdf(null)
     setPages([])
     pageRefs.current.clear()
     setNumPages(0)
     setCurrentPage(1)
+    setScale(1)
     setVisiblePages(new Set([1, 2]))
     setSelection(null)
     setToolbarPosition(null)
@@ -245,22 +250,95 @@ export function PdfViewer({
     const root = stageRef.current
     if (!firstPageWidth || !root) return
     const availableWidth = Math.max(240, root.clientWidth - 64)
-    setScale(clampScale(availableWidth / firstPageWidth))
-    fitAppliedRef.current = true
+    const nextScale = clampPdfScale(availableWidth / firstPageWidth)
+    fitModeRef.current = true
+    scaleRef.current = nextScale
+    setScale(nextScale)
   }, [firstPageWidth])
 
   useEffect(() => {
-    if (pages.length === 0 || fitAppliedRef.current) return
+    if (pages.length === 0) return
     const root = stageRef.current
     if (!root) return
     const fit = (): void => {
-      if (root.clientWidth > 0) fitToWidth()
+      if (root.clientWidth > 0 && fitModeRef.current) fitToWidth()
     }
     fit()
-    const observer = new ResizeObserver(fit)
+    let resizeTimeout: number | null = null
+    const observer = new ResizeObserver(() => {
+      if (resizeTimeout !== null) window.clearTimeout(resizeTimeout)
+      resizeTimeout = window.setTimeout(fit, 180)
+    })
     observer.observe(root)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      if (resizeTimeout !== null) window.clearTimeout(resizeTimeout)
+    }
   }, [fitToWidth, pages.length])
+
+  const changeScale = useCallback((nextScale: number): void => {
+    const clamped = clampPdfScale(nextScale)
+    fitModeRef.current = false
+    scaleRef.current = clamped
+    setScale(clamped)
+  }, [])
+
+  useEffect(() => {
+    const root = stageRef.current
+    if (!root || loadState !== 'ready') return undefined
+
+    const handleWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      const nextScale = scaleFromCtrlWheel(scaleRef.current, event.deltaY)
+      if (nextScale === scaleRef.current) return
+
+      const target = event.target instanceof Element ? event.target : null
+      const pageElement = target?.closest<HTMLDivElement>('[data-page-number]') ?? null
+      const pageNumber = pageElement ? Number(pageElement.dataset.pageNumber) : null
+      const pageRect = pageElement?.getBoundingClientRect()
+      const rootRect = root.getBoundingClientRect()
+      const anchor = pageRect && pageRect.width > 0 && pageRect.height > 0
+        ? {
+            pageNumber,
+            x: (event.clientX - pageRect.left) / pageRect.width,
+            y: (event.clientY - pageRect.top) / pageRect.height
+          }
+        : null
+      const fallback = {
+        x: root.scrollLeft + event.clientX - rootRect.left,
+        y: root.scrollTop + event.clientY - rootRect.top,
+        ratio: nextScale / scaleRef.current
+      }
+
+      clearSelection()
+      changeScale(nextScale)
+
+      if (zoomFrameRef.current !== null) window.cancelAnimationFrame(zoomFrameRef.current)
+      zoomFrameRef.current = window.requestAnimationFrame(() => {
+        zoomFrameRef.current = window.requestAnimationFrame(() => {
+          if (anchor?.pageNumber) {
+            const updatedPage = pageRefs.current.get(anchor.pageNumber)
+            const updatedRect = updatedPage?.getBoundingClientRect()
+            if (updatedRect) {
+              root.scrollLeft += updatedRect.left + updatedRect.width * anchor.x - event.clientX
+              root.scrollTop += updatedRect.top + updatedRect.height * anchor.y - event.clientY
+            }
+          } else {
+            root.scrollLeft = fallback.x * fallback.ratio - (event.clientX - rootRect.left)
+            root.scrollTop = fallback.y * fallback.ratio - (event.clientY - rootRect.top)
+          }
+          zoomFrameRef.current = null
+        })
+      })
+    }
+
+    root.addEventListener('wheel', handleWheel, { passive: false })
+    return () => {
+      root.removeEventListener('wheel', handleWheel)
+      if (zoomFrameRef.current !== null) window.cancelAnimationFrame(zoomFrameRef.current)
+    }
+  }, [changeScale, clearSelection, loadState])
 
   const scrollToPage = useCallback((pageNumber: number, locator?: PdfLocator | null): void => {
     const root = stageRef.current
@@ -461,7 +539,7 @@ export function PdfViewer({
           <button
             className="pdf-tool-button"
             type="button"
-            onClick={() => setScale((value) => clampScale(value - 0.1))}
+            onClick={() => changeScale(scaleRef.current - 0.1)}
             aria-label="缩小"
             title="缩小"
           >
@@ -471,7 +549,7 @@ export function PdfViewer({
           <button
             className="pdf-tool-button"
             type="button"
-            onClick={() => setScale((value) => clampScale(value + 0.1))}
+            onClick={() => changeScale(scaleRef.current + 0.1)}
             aria-label="放大"
             title="放大"
           >
@@ -483,7 +561,7 @@ export function PdfViewer({
           </button>
         </div>
         <div className="pdf-toolbar-hint">
-          <MousePointer2 size={14} /> 选中文字后可摘录、划线或高亮
+          <MousePointer2 size={14} /> 选中文字后可摘录、划线或高亮 · Ctrl + 滚轮缩放
         </div>
       </div>
 
@@ -733,10 +811,6 @@ function unionRects(rects: DOMRect[]): DOMRect {
   const right = Math.max(...rects.map((rect) => rect.right))
   const bottom = Math.max(...rects.map((rect) => rect.bottom))
   return new DOMRect(left, top, right - left, bottom - top)
-}
-
-function clampScale(value: number): number {
-  return Math.round(Math.max(0.55, Math.min(2.5, value)) * 100) / 100
 }
 
 function normalizePdfError(error: unknown): string {

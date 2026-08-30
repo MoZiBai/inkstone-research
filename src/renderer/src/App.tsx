@@ -159,16 +159,17 @@ export default function App(): React.JSX.Element {
             <strong>砚台</strong>
             <small>RESEARCH DESK</small>
           </span>
-          <button
-            className="sidebar-collapse-button"
-            type="button"
-            aria-label={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
-            title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
-            onClick={() => setSidebarCollapsed((current) => !current)}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
-          </button>
         </header>
+
+        <button
+          className="sidebar-collapse-button"
+          type="button"
+          aria-label={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+          title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+          onClick={() => setSidebarCollapsed((current) => !current)}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+        </button>
 
         <div className="sidebar-section-heading">
           <span>我的项目</span>

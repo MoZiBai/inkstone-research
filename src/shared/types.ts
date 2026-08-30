@@ -58,6 +58,7 @@ export interface ProjectCardView {
   documentYear: number | null
   rawText: string
   cleanText: string
+  displayText: string
   pdfPage: number | null
   printPage: string | null
   locatorJson: string
@@ -197,6 +198,7 @@ export interface CreateCardFromSelectionInput {
   projectId: string
   documentId: string
   rawText: string
+  displayText: string
   pdfPage: number
   printPage?: string | null
   locatorJson: string

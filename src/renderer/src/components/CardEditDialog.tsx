@@ -54,7 +54,7 @@ export function CardEditDialog({
       width="large"
     >
       <form onSubmit={submit}>
-        <blockquote className="dialog-quote">{card.cleanText}</blockquote>
+        <blockquote className="dialog-quote">{card.displayText}</blockquote>
         <div className="form-grid two-columns">
           <label className="field">
             <span>研究作用</span>

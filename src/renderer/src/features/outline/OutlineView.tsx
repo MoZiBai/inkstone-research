@@ -68,7 +68,7 @@ export function OutlineView({
       snapshot.cards.filter((card) => {
         if (card.synthesisState !== 'active') return false
         if (!deferredCardQuery) return true
-        return [card.cleanText, card.comment, card.documentTitle, card.documentAuthors, ...card.tags]
+        return [card.displayText, card.comment, card.documentTitle, card.documentAuthors, ...card.tags]
           .join('\n')
           .toLocaleLowerCase()
           .includes(deferredCardQuery)
@@ -235,7 +235,7 @@ export function OutlineView({
                             onClick={() => setViewingCard(card)}
                             title="打开卡片详情"
                           >
-                            <strong>{card.cleanText}</strong>
+                            <strong>{card.displayText}</strong>
                             <small>
                               {card.documentAuthors || '未知作者'} · 第{' '}
                               {card.printPage ?? card.pdfPage ?? '—'} 页
@@ -358,7 +358,7 @@ export function OutlineView({
                   <span>
                     {card.documentAuthors || '未知作者'} · {card.printPage ?? card.pdfPage ?? '—'}
                   </span>
-                  <p>{card.cleanText}</p>
+                  <p>{card.displayText}</p>
                   <div>
                     <small title={usageLabel}>{usageLabel}</small>
                     <button

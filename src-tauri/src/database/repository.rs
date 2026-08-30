@@ -161,7 +161,9 @@ impl Repository {
                 r#"
                 SELECT pc.id, pc.project_id, pc.excerpt_id,
                        d.id, d.title, d.authors, d.year,
-                       se.raw_text, se.clean_text, se.pdf_page, se.print_page,
+                       se.raw_text, se.clean_text,
+                       COALESCE(NULLIF(pc.text_override, ''), se.clean_text),
+                       se.pdf_page, se.print_page,
                        se.locator_json, se.context_before, se.context_after, se.source_hash,
                        pc.comment, pc.role, pc.category_id, pc.synthesis_state,
                        COALESCE(GROUP_CONCAT(t.name, char(31)), ''),
@@ -177,7 +179,7 @@ impl Repository {
                 "#,
             )?;
             let rows = statement.query_map(params![project_id], |row| {
-                let tags_value: String = row.get(19)?;
+                let tags_value: String = row.get(20)?;
                 let tags = if tags_value.is_empty() {
                     Vec::new()
                 } else {
@@ -193,19 +195,20 @@ impl Repository {
                     document_year: row.get(6)?,
                     raw_text: row.get(7)?,
                     clean_text: row.get(8)?,
-                    pdf_page: row.get(9)?,
-                    print_page: row.get(10)?,
-                    locator_json: row.get(11)?,
-                    context_before: row.get(12)?,
-                    context_after: row.get(13)?,
-                    source_hash: row.get(14)?,
-                    comment: row.get(15)?,
-                    role: row.get(16)?,
-                    category_id: row.get(17)?,
-                    synthesis_state: row.get(18)?,
+                    display_text: row.get(9)?,
+                    pdf_page: row.get(10)?,
+                    print_page: row.get(11)?,
+                    locator_json: row.get(12)?,
+                    context_before: row.get(13)?,
+                    context_after: row.get(14)?,
+                    source_hash: row.get(15)?,
+                    comment: row.get(16)?,
+                    role: row.get(17)?,
+                    category_id: row.get(18)?,
+                    synthesis_state: row.get(19)?,
                     tags,
-                    created_at: row.get(20)?,
-                    updated_at: row.get(21)?,
+                    created_at: row.get(21)?,
+                    updated_at: row.get(22)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -744,6 +747,7 @@ impl Repository {
     ) -> AppResult<String> {
         validate_role(&input.role)?;
         validate_selection_text(&input.raw_text)?;
+        let display_text = required_long_text(&input.display_text, "卡片摘录文字", 50_000)?;
         validate_locator(&input.locator_json, input.pdf_page)?;
         let normalized_tags = normalize_tags(&input.tags)?;
         ensure_project_document(&self.connection, &input.project_id, &input.document_id)?;
@@ -837,17 +841,23 @@ impl Repository {
             .optional()?
             .ok_or_else(|| AppError::Validation("当前项目缺少默认整理分类。".into()))?;
         let card_id = Uuid::new_v4().to_string();
+        let text_override = if display_text == input.raw_text {
+            ""
+        } else {
+            display_text.as_str()
+        };
         transaction.execute(
             r#"
             INSERT INTO project_cards
-              (id, project_id, excerpt_id, comment, role, category_id,
+              (id, project_id, excerpt_id, text_override, comment, role, category_id,
                synthesis_state, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8)
             "#,
             params![
                 card_id,
                 input.project_id,
                 excerpt_id,
+                text_override,
                 input.comment.trim(),
                 input.role,
                 category_id,
@@ -924,11 +934,7 @@ impl Repository {
                     ));
                 }
                 validate_locator(&input.locator_json, page_number)?;
-                ensure_project_document(
-                    &self.connection,
-                    &input.project_id,
-                    &input.document_id,
-                )?;
+                ensure_project_document(&self.connection, &input.project_id, &input.document_id)?;
             }
             None if !input.locator_json.trim().is_empty() || !selected_text.is_empty() => {
                 return Err(AppError::Validation(
@@ -2293,6 +2299,7 @@ mod tests {
                     project_id: project_id.clone(),
                     document_id: first_import.document_id.clone(),
                     raw_text: "一段来自测试 PDF 的原文".into(),
+                    display_text: "一段经人工修正的 PDF 原文".into(),
                     pdf_page: 1,
                     print_page: Some("7".into()),
                     locator_json: locator_json.into(),
@@ -2375,6 +2382,8 @@ mod tests {
                 .find(|card| card.id == card_id)
                 .expect("card survives reopen");
             assert_eq!(card.raw_text, "一段来自测试 PDF 的原文");
+            assert_eq!(card.clean_text, "一段来自测试 PDF 的原文");
+            assert_eq!(card.display_text, "一段经人工修正的 PDF 原文");
             assert_eq!(card.locator_json, locator_json);
             let annotation = snapshot
                 .pdf_annotations
