@@ -33,6 +33,7 @@ import {
   Upload
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type {
   BackupManagerState,
@@ -90,6 +91,8 @@ export default function App(): React.JSX.Element {
   const [backupManager, setBackupManager] = useState<BackupManagerState | null>(null)
   const [backupManagerError, setBackupManagerError] = useState<string | null>(null)
   const [backupManagerBusy, setBackupManagerBusy] = useState(false)
+  const [showCloseChoice, setShowCloseChoice] = useState(false)
+  const [closeChoiceBusy, setCloseChoiceBusy] = useState(false)
   const [deletingBackup, setDeletingBackup] = useState<BackupRecord | null>(null)
   const [pendingDatabaseImport, setPendingDatabaseImport] = useState<{
     path: string
@@ -147,24 +150,22 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
-  const checkScheduledBackup = useCallback(async (): Promise<void> => {
-    try {
-      setBackupManager(await api.runScheduledBackup())
-      setBackupManagerError(null)
-    } catch (error) {
-      setBackupManagerError(normalizeError(error))
-    }
-  }, [])
-
   useEffect(() => {
     void loadWorkspace()
   }, [loadWorkspace])
 
   useEffect(() => {
-    void checkScheduledBackup()
-    const interval = window.setInterval(() => void checkScheduledBackup(), 15 * 60 * 1000)
-    return () => window.clearInterval(interval)
-  }, [checkScheduledBackup])
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('app-close-requested', () => setShowCloseChoice(true)).then((stop) => {
+      if (disposed) stop()
+      else unlisten = stop
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
 
   useEffect(() => {
     try {
@@ -359,7 +360,7 @@ export default function App(): React.JSX.Element {
         customDirectory: directory,
         retentionDays: backupManager?.settings.retentionDays ?? null,
         retentionCount: backupManager?.settings.retentionCount ?? null,
-        automaticIntervalHours: backupManager?.settings.automaticIntervalHours ?? 24
+        automaticIntervalMinutes: backupManager?.settings.automaticIntervalMinutes ?? 120
       })
       setBackupManager(next)
       setBackupManagerError(null)
@@ -375,20 +376,23 @@ export default function App(): React.JSX.Element {
     customDirectory: string | null,
     retentionDays: number | null,
     retentionCount: number | null,
-    automaticIntervalHours: number
+    automaticIntervalMinutes: number
   ): Promise<void> => {
+    const intervalChanged =
+      backupManager?.settings.automaticIntervalMinutes !== automaticIntervalMinutes
     setBackupManagerBusy(true)
     try {
       const next = await api.updateBackupSettings({
         customDirectory,
         retentionDays,
         retentionCount,
-        automaticIntervalHours
+        automaticIntervalMinutes
       })
       setBackupManager(next)
       setBackupManagerError(null)
-      notify('自动备份设置已保存。')
-      void checkScheduledBackup()
+      notify(intervalChanged
+        ? '自动备份周期已保存；倒计时从现在重新开始。'
+        : '自动备份设置已保存。')
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
@@ -928,7 +932,7 @@ export default function App(): React.JSX.Element {
               null,
               backupManager?.settings.retentionDays ?? null,
               backupManager?.settings.retentionCount ?? null,
-              backupManager?.settings.automaticIntervalHours ?? 24
+              backupManager?.settings.automaticIntervalMinutes ?? 120
             )
           }
           onUpdateRetention={(retentionDays, retentionCount) =>
@@ -936,15 +940,15 @@ export default function App(): React.JSX.Element {
               backupManager?.settings.customDirectory ?? null,
               retentionDays,
               retentionCount,
-              backupManager?.settings.automaticIntervalHours ?? 24
+              backupManager?.settings.automaticIntervalMinutes ?? 120
             )
           }
-          onUpdateInterval={(automaticIntervalHours) =>
+          onUpdateInterval={(automaticIntervalMinutes) =>
             void updateBackupSettings(
               backupManager?.settings.customDirectory ?? null,
               backupManager?.settings.retentionDays ?? null,
               backupManager?.settings.retentionCount ?? null,
-              automaticIntervalHours
+              automaticIntervalMinutes
             )
           }
           onCreateSnapshot={() => void createBackupSnapshot()}
@@ -989,6 +993,59 @@ export default function App(): React.JSX.Element {
         />
       ) : null}
 
+      {showCloseChoice ? (
+        <Modal
+          title="关闭砚台"
+          subtitle="隐藏到后台后，自动备份仍会按本次启动后的倒计时继续运行。"
+          onClose={() => {
+            if (!closeChoiceBusy) setShowCloseChoice(false)
+          }}
+          width="small"
+        >
+          <p className="confirm-description">
+            直接退出会停止自动备份；下次打开软件时会重新开始计算周期，不会补做关闭期间的备份。
+          </p>
+          <div className="modal-actions">
+            <button
+              className="button ghost"
+              type="button"
+              disabled={closeChoiceBusy}
+              onClick={() => setShowCloseChoice(false)}
+            >
+              取消
+            </button>
+            <button
+              className="button ghost"
+              type="button"
+              disabled={closeChoiceBusy}
+              onClick={() => {
+                setCloseChoiceBusy(true)
+                void api.hideToTray()
+                  .then(() => setShowCloseChoice(false))
+                  .catch((error) => notify(normalizeError(error), 'error'))
+                  .finally(() => setCloseChoiceBusy(false))
+              }}
+            >
+              隐藏到后台
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              disabled={closeChoiceBusy}
+              onClick={() => {
+                setCloseChoiceBusy(true)
+                void api.exitApplication().catch((error) => {
+                  setCloseChoiceBusy(false)
+                  notify(normalizeError(error), 'error')
+                })
+              }}
+            >
+              直接退出
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
       <div
         className={`toast toast-${toast?.kind ?? 'success'} ${toast ? 'show' : ''}`}
         role={toast?.kind === 'error' ? 'alert' : 'status'}
@@ -1025,7 +1082,7 @@ interface DatabaseTransferDialogProps {
   onChooseDirectory: () => void
   onResetDirectory: () => void
   onUpdateRetention: (retentionDays: number | null, retentionCount: number | null) => void
-  onUpdateInterval: (automaticIntervalHours: number) => void
+  onUpdateInterval: (automaticIntervalMinutes: number) => void
   onCreateSnapshot: () => void
   onCleanup: () => void
   onRevealDirectory: () => void
@@ -1056,7 +1113,7 @@ function DatabaseTransferDialog({
 }: DatabaseTransferDialogProps): React.JSX.Element {
   const retentionDays = manager?.settings.retentionDays ?? null
   const retentionCount = manager?.settings.retentionCount ?? null
-  const automaticIntervalHours = manager?.settings.automaticIntervalHours ?? 24
+  const automaticIntervalMinutes = manager?.settings.automaticIntervalMinutes ?? 120
   const retentionValue = retentionCount !== null
     ? `count:${retentionCount}`
     : retentionDays !== null
@@ -1103,7 +1160,7 @@ function DatabaseTransferDialog({
         <header className="backup-manager-heading">
           <div>
             <h3>自动安全备份</h3>
-            <p>按所选频率备份当前数据库；导入合并前还会额外创建一份安全备份。</p>
+            <p>周期从每次启动软件后开始计算；隐藏到后台仍继续，完全退出后停止。</p>
           </div>
           <button className="icon-button" type="button" disabled={managerBusy} onClick={onRefresh} aria-label="刷新备份列表">
             <RefreshCw className={managerBusy ? 'spin' : undefined} size={16} />
@@ -1148,15 +1205,17 @@ function DatabaseTransferDialog({
                 <label>
                   <span>周期</span>
                   <select
-                    value={String(automaticIntervalHours)}
+                    value={String(automaticIntervalMinutes)}
                     disabled={allBusy}
                     onChange={(event) => onUpdateInterval(Number(event.target.value))}
                   >
                     <option value="0">关闭周期备份</option>
-                    <option value="24">每天（默认）</option>
-                    <option value="72">每 3 天</option>
-                    <option value="168">每周</option>
-                    <option value="720">每月</option>
+                    <option value="30">每 30 分钟</option>
+                    <option value="60">每 1 小时</option>
+                    <option value="120">每 2 小时（默认）</option>
+                    <option value="360">每 6 小时</option>
+                    <option value="720">每 12 小时</option>
+                    <option value="1440">每 24 小时</option>
                   </select>
                 </label>
                 <label>
@@ -1195,7 +1254,7 @@ function DatabaseTransferDialog({
                 <span>
                   {manager.settings.lastAutomaticBackupAt
                     ? `最近受管备份：${formatDateTime(manager.settings.lastAutomaticBackupAt)}`
-                    : automaticIntervalHours === 0
+                    : automaticIntervalMinutes === 0
                       ? '周期备份已关闭，可随时主动备份'
                       : '尚未完成过受管备份'}
                 </span>

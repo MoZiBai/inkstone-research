@@ -5,10 +5,30 @@ mod models;
 mod pdf_files;
 
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use commands::AppState;
 use database::Repository;
-use tauri::Manager;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, WindowEvent,
+};
+
+pub(crate) static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn exit_application(app: &tauri::AppHandle) {
+    EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -23,13 +43,51 @@ pub fn run() {
             fs::create_dir_all(&backup_directory)?;
             let pdf_library_directory = app_data_directory.join("pdf-library");
             fs::create_dir_all(&pdf_library_directory)?;
-            app.manage(AppState::new(
+            let state = AppState::new(
                 repository,
                 database_path,
                 backup_directory,
                 pdf_library_directory,
-            ));
+            );
+            state.start_backup_scheduler();
+            app.manage(state);
+
+            let open_item = MenuItem::with_id(app, "open", "打开窗口", true, None::<&str>)?;
+            let exit_item = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &exit_item])?;
+            let mut tray = TrayIconBuilder::with_id("main-tray")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => show_main_window(app),
+                    "exit" => exit_application(app),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if !EXIT_REQUESTED.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.emit("app-close-requested", ());
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_workspace,
@@ -53,12 +111,13 @@ pub fn run() {
             commands::preview_database_import,
             commands::get_backup_manager,
             commands::update_backup_settings,
-            commands::run_scheduled_backup,
             commands::create_backup_snapshot,
             commands::cleanup_backups,
             commands::delete_automatic_backup,
             commands::reveal_backup,
             commands::reveal_backup_directory,
+            commands::hide_to_tray,
+            commands::exit_application,
             commands::read_pdf,
             commands::reveal_pdf_in_file_manager,
             commands::create_card_from_selection,

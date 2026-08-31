@@ -3,9 +3,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tauri::{ipc::Response, State};
+use tauri::{ipc::Response, AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::database::Repository;
@@ -53,6 +55,62 @@ impl AppState {
             .lock()
             .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))
     }
+
+    pub fn start_backup_scheduler(&self) {
+        let repository = Arc::clone(&self.repository);
+        let default_directory = self.backup_directory.clone();
+        let _ = thread::Builder::new()
+            .name("inkstone-backup-scheduler".into())
+            .spawn(move || {
+                let mut schedule = SessionBackupSchedule::default();
+                loop {
+                    let now = Instant::now();
+                    if let Ok(mut guard) = repository.lock() {
+                        if let Ok(preferences) = guard.backup_preferences() {
+                            schedule.configure(preferences.automatic_interval_minutes, now);
+                            if schedule.take_due(now) {
+                                let _ = create_scheduled_backup(&mut guard, &default_directory);
+                            }
+                        }
+                    }
+                    thread::sleep(Duration::from_secs(10));
+                }
+            });
+    }
+}
+
+#[derive(Default)]
+struct SessionBackupSchedule {
+    interval_minutes: i64,
+    next_due: Option<Instant>,
+}
+
+impl SessionBackupSchedule {
+    fn configure(&mut self, interval_minutes: i64, now: Instant) {
+        if self.interval_minutes == interval_minutes {
+            return;
+        }
+        self.interval_minutes = interval_minutes;
+        self.next_due = interval_duration(interval_minutes).map(|interval| now + interval);
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        let Some(next_due) = self.next_due else {
+            return false;
+        };
+        if now < next_due {
+            return false;
+        }
+        self.next_due = interval_duration(self.interval_minutes).map(|interval| now + interval);
+        true
+    }
+}
+
+fn interval_duration(interval_minutes: i64) -> Option<Duration> {
+    u64::try_from(interval_minutes)
+        .ok()
+        .filter(|minutes| *minutes > 0)
+        .map(|minutes| Duration::from_secs(minutes.saturating_mul(60)))
 }
 
 fn validated_writable_backup_directory(path: &Path) -> AppResult<PathBuf> {
@@ -149,7 +207,7 @@ fn backup_manager_state(
             effective_directory: resolved.directory.to_string_lossy().into_owned(),
             retention_days: resolved.retention_days,
             retention_count: resolved.retention_count,
-            automatic_interval_hours: preferences.automatic_interval_hours,
+            automatic_interval_minutes: preferences.automatic_interval_minutes,
             last_automatic_backup_at: preferences.last_automatic_backup_at,
             last_automatic_backup_result: preferences.last_automatic_backup_result,
             directory_warning: resolved.warning,
@@ -586,48 +644,28 @@ pub fn update_backup_settings(
         custom_directory.as_deref(),
         input.retention_days,
         input.retention_count,
-        input.automatic_interval_hours,
+        input.automatic_interval_minutes,
     )?;
     backup_manager_state(&mut guard, &state.backup_directory)
 }
 
-#[tauri::command]
-pub async fn run_scheduled_backup(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
-    let repository = Arc::clone(&state.repository);
-    let default_directory = state.backup_directory.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = repository
-            .lock()
-            .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))?;
-        let resolved = resolved_backup_directory(&guard, &default_directory)?;
-        guard.register_automatic_backups_in_directory(&resolved.directory)?;
-        let preferences = guard.backup_preferences()?;
-        let interval_hours = preferences.automatic_interval_hours;
-        let now = Utc::now();
-        let due = scheduled_backup_is_due(
-            interval_hours,
-            preferences.last_automatic_backup_at.as_deref(),
-            now,
-        );
-        if due {
-            let destination = resolved.directory.join(format!(
-                "inkstone-before-scheduled-{}-{}.db",
-                now.format("%Y%m%d-%H%M%S"),
-                &Uuid::new_v4().to_string()[..8]
-            ));
-            guard.export_database(&destination)?;
-            guard.record_backup(&destination, "auto", None, Some(&resolved.directory))?;
-            guard.mark_automatic_backup_completed(&destination)?;
-            guard.cleanup_automatic_backups(
-                &resolved.directory,
-                resolved.retention_days,
-                resolved.retention_count,
-            )?;
-        }
-        backup_manager_state(&mut guard, &default_directory)
-    })
-    .await
-    .map_err(|error| AppError::Validation(format!("自动备份任务失败：{error}")))?
+fn create_scheduled_backup(repository: &mut Repository, default_directory: &Path) -> AppResult<()> {
+    let resolved = resolved_backup_directory(repository, default_directory)?;
+    repository.register_automatic_backups_in_directory(&resolved.directory)?;
+    let destination = resolved.directory.join(format!(
+        "inkstone-before-scheduled-{}-{}.db",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        &Uuid::new_v4().to_string()[..8]
+    ));
+    repository.export_database(&destination)?;
+    repository.record_backup(&destination, "auto", None, Some(&resolved.directory))?;
+    repository.mark_automatic_backup_completed(&destination)?;
+    repository.cleanup_automatic_backups(
+        &resolved.directory,
+        resolved.retention_days,
+        resolved.retention_count,
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -658,23 +696,6 @@ pub async fn create_backup_snapshot(state: State<'_, AppState>) -> AppResult<Bac
     .map_err(|error| AppError::Validation(format!("主动备份任务失败：{error}")))?
 }
 
-fn scheduled_backup_is_due(
-    interval_hours: i64,
-    last_automatic_backup_at: Option<&str>,
-    now: chrono::DateTime<Utc>,
-) -> bool {
-    if interval_hours <= 0 {
-        return false;
-    }
-    last_automatic_backup_at
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .is_none_or(|last| {
-            now.signed_duration_since(last.with_timezone(&Utc))
-                .num_hours()
-                >= interval_hours
-        })
-}
-
 #[tauri::command]
 pub fn cleanup_backups(state: State<'_, AppState>) -> AppResult<BackupCleanupResult> {
     let mut guard = state.lock()?;
@@ -702,6 +723,22 @@ pub fn reveal_backup_directory(state: State<'_, AppState>) -> AppResult<()> {
     let guard = state.lock()?;
     let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
     reveal_path(&resolved.directory, false)
+}
+
+#[tauri::command]
+pub fn hide_to_tray(app: AppHandle) -> AppResult<()> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| AppError::NotFound("主窗口".into()))?;
+    window
+        .hide()
+        .map_err(|error| AppError::Validation(format!("隐藏主窗口失败：{error}")))
+}
+
+#[tauri::command]
+pub fn exit_application(app: AppHandle) {
+    crate::EXIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
 }
 
 fn paths_refer_to_same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
@@ -942,30 +979,34 @@ pub fn move_outline_card(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone};
+    use std::time::{Duration, Instant};
 
-    use super::scheduled_backup_is_due;
+    use super::SessionBackupSchedule;
 
     #[test]
-    fn scheduled_backup_respects_disabled_and_elapsed_intervals() {
-        let now = chrono::Utc
-            .with_ymd_and_hms(2026, 8, 31, 12, 0, 0)
-            .single()
-            .expect("test time");
-        let twenty_three_hours_ago = (now - Duration::hours(23)).to_rfc3339();
-        let twenty_four_hours_ago = (now - Duration::hours(24)).to_rfc3339();
-        assert!(!scheduled_backup_is_due(0, None, now));
-        assert!(scheduled_backup_is_due(24, None, now));
-        assert!(!scheduled_backup_is_due(
-            24,
-            Some(&twenty_three_hours_ago),
-            now
-        ));
-        assert!(scheduled_backup_is_due(
-            24,
-            Some(&twenty_four_hours_ago),
-            now
-        ));
-        assert!(scheduled_backup_is_due(24, Some("invalid"), now));
+    fn session_schedule_starts_from_launch_and_repeats_after_each_due_time() {
+        let launch = Instant::now();
+        let mut schedule = SessionBackupSchedule::default();
+
+        schedule.configure(30, launch);
+        assert!(!schedule.take_due(launch + Duration::from_secs(29 * 60 + 59)));
+        assert!(schedule.take_due(launch + Duration::from_secs(30 * 60)));
+        assert!(!schedule.take_due(launch + Duration::from_secs(59 * 60 + 59)));
+        assert!(schedule.take_due(launch + Duration::from_secs(60 * 60)));
+    }
+
+    #[test]
+    fn session_schedule_can_be_disabled_and_interval_changes_reset_the_timer() {
+        let launch = Instant::now();
+        let mut schedule = SessionBackupSchedule::default();
+
+        schedule.configure(0, launch);
+        assert!(!schedule.take_due(launch + Duration::from_secs(24 * 60 * 60)));
+
+        schedule.configure(30, launch);
+        let changed_at = launch + Duration::from_secs(20 * 60);
+        schedule.configure(60, changed_at);
+        assert!(!schedule.take_due(launch + Duration::from_secs(70 * 60)));
+        assert!(schedule.take_due(launch + Duration::from_secs(80 * 60)));
     }
 }

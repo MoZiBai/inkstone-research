@@ -1216,16 +1216,16 @@ impl Repository {
         validate_backup_retention(retention_days, retention_count)?;
         let last_cleanup_at = metadata_value(&self.connection, "backup_last_cleanup_at")?;
         let last_cleanup_result = metadata_value(&self.connection, "backup_last_cleanup_result")?;
-        let automatic_interval_hours =
-            metadata_value(&self.connection, "backup_automatic_interval_hours")?
+        let automatic_interval_minutes =
+            metadata_value(&self.connection, "backup_automatic_interval_minutes")?
                 .map(|value| {
                     value.parse::<i64>().map_err(|_| {
                         AppError::Validation("自动备份频率设置损坏，请重新设置。".into())
                     })
                 })
                 .transpose()?
-                .unwrap_or(24);
-        validate_automatic_backup_interval(automatic_interval_hours)?;
+                .unwrap_or(120);
+        validate_automatic_backup_interval(automatic_interval_minutes)?;
         let last_automatic_backup_at =
             metadata_value(&self.connection, "backup_last_automatic_at")?;
         let last_automatic_backup_result =
@@ -1234,7 +1234,7 @@ impl Repository {
             custom_directory,
             retention_days,
             retention_count,
-            automatic_interval_hours,
+            automatic_interval_minutes,
             last_automatic_backup_at,
             last_automatic_backup_result,
             last_cleanup_at,
@@ -1247,10 +1247,10 @@ impl Repository {
         custom_directory: Option<&Path>,
         retention_days: Option<i64>,
         retention_count: Option<i64>,
-        automatic_interval_hours: i64,
+        automatic_interval_minutes: i64,
     ) -> AppResult<()> {
         validate_backup_retention(retention_days, retention_count)?;
-        validate_automatic_backup_interval(automatic_interval_hours)?;
+        validate_automatic_backup_interval(automatic_interval_minutes)?;
         let transaction = self.connection.transaction()?;
         set_or_remove_metadata(
             &transaction,
@@ -1269,8 +1269,8 @@ impl Repository {
         )?;
         set_or_remove_metadata(
             &transaction,
-            "backup_automatic_interval_hours",
-            Some(automatic_interval_hours.to_string()),
+            "backup_automatic_interval_minutes",
+            Some(automatic_interval_minutes.to_string()),
         )?;
         transaction.commit()?;
         Ok(())
@@ -2876,8 +2876,8 @@ fn set_or_remove_metadata(
     Ok(())
 }
 
-fn validate_automatic_backup_interval(interval_hours: i64) -> AppResult<()> {
-    if [0, 24, 72, 168, 720].contains(&interval_hours) {
+fn validate_automatic_backup_interval(interval_minutes: i64) -> AppResult<()> {
+    if [0, 30, 60, 120, 360, 720, 1440].contains(&interval_minutes) {
         Ok(())
     } else {
         Err(AppError::Validation(
@@ -5089,7 +5089,7 @@ mod tests {
         {
             let mut source = Repository::open(&source_path).expect("open source repository");
             source
-                .set_backup_preferences(Some(&root), Some(30), None, 24)
+                .set_backup_preferences(Some(&root), Some(30), None, 120)
                 .expect("set source-only backup preferences");
             source
                 .export_database(&manual_backup_path)
@@ -5644,7 +5644,7 @@ mod tests {
         {
             let mut repository = Repository::open(&database_path).expect("open database");
             repository
-                .set_backup_preferences(Some(&custom_directory), None, Some(12), 72)
+                .set_backup_preferences(Some(&custom_directory), None, Some(12), 360)
                 .expect("save backup preferences");
         }
 
@@ -5659,7 +5659,7 @@ mod tests {
             );
             assert_eq!(preferences.retention_days, None);
             assert_eq!(preferences.retention_count, Some(12));
-            assert_eq!(preferences.automatic_interval_hours, 72);
+            assert_eq!(preferences.automatic_interval_minutes, 360);
         }
 
         for suffix in ["", "-wal", "-shm"] {

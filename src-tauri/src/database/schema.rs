@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -383,9 +383,31 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
             UPDATE app_metadata
             SET value = '24'
             WHERE key = 'backup_automatic_interval_hours'
-              AND value NOT IN ('0', '24', '72', '168', '720')
+              AND value NOT IN ('0', '6', '12', '24', '72', '168', '720')
             "#,
             [],
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+
+    if current_version < 12 {
+        connection.execute_batch(
+            r#"
+            INSERT INTO app_metadata (key, value)
+            SELECT 'backup_automatic_interval_minutes',
+                   CASE CAST(value AS INTEGER)
+                     WHEN 0 THEN '0'
+                     WHEN 6 THEN '360'
+                     WHEN 12 THEN '720'
+                     ELSE '1440'
+                   END
+            FROM app_metadata
+            WHERE key = 'backup_automatic_interval_hours'
+            ON CONFLICT(key) DO NOTHING;
+
+            DELETE FROM app_metadata
+            WHERE key = 'backup_automatic_interval_hours';
+            "#,
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -852,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn version_ten_database_normalizes_legacy_backup_intervals() {
+    fn version_ten_database_migrates_legacy_backup_hours_to_minutes() {
         let mut connection = Connection::open_in_memory().expect("memory database");
         migrate_database(&mut connection).expect("create current schema");
         connection
@@ -873,12 +895,20 @@ mod tests {
             .expect("schema version");
         let interval: String = connection
             .query_row(
-                "SELECT value FROM app_metadata WHERE key = 'backup_automatic_interval_hours'",
+                "SELECT value FROM app_metadata WHERE key = 'backup_automatic_interval_minutes'",
                 [],
                 |row| row.get(0),
             )
-            .expect("normalized backup interval");
+            .expect("migrated backup interval");
+        let old_key_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM app_metadata WHERE key = 'backup_automatic_interval_hours'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy key count");
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(interval, "24");
+        assert_eq!(interval, "360");
+        assert_eq!(old_key_count, 0);
     }
 }

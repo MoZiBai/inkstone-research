@@ -384,7 +384,7 @@ pub struct BackupSettings {
     pub effective_directory: String,
     pub retention_days: Option<i64>,
     pub retention_count: Option<i64>,
-    pub automatic_interval_hours: i64,
+    pub automatic_interval_minutes: i64,
     pub last_automatic_backup_at: Option<String>,
     pub last_automatic_backup_result: Option<String>,
     pub directory_warning: Option<String>,
@@ -397,7 +397,7 @@ pub struct BackupPreferences {
     pub custom_directory: Option<String>,
     pub retention_days: Option<i64>,
     pub retention_count: Option<i64>,
-    pub automatic_interval_hours: i64,
+    pub automatic_interval_minutes: i64,
     pub last_automatic_backup_at: Option<String>,
     pub last_automatic_backup_result: Option<String>,
     pub last_cleanup_at: Option<String>,
@@ -426,7 +426,7 @@ pub struct UpdateBackupSettingsInput {
     pub custom_directory: Option<String>,
     pub retention_days: Option<i64>,
     pub retention_count: Option<i64>,
-    pub automatic_interval_hours: i64,
+    pub automatic_interval_minutes: i64,
 }
 
 #[derive(Debug, Deserialize)]
