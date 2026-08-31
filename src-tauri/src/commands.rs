@@ -9,10 +9,10 @@ use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, DatabaseImportResult,
-    ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, RemoveDocumentInput, UpdateCardInput,
-    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput,
-    WorkspaceSnapshot,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    DatabaseImportResult, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
+    RemoveDocumentInput, UpdateCardInput, UpdateCategoryInput, UpdateDocumentInput,
+    UpdateOutlineNodeInput, UpdateProjectInput, UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -364,6 +364,44 @@ pub fn delete_reading_note(note_id: String, state: State<'_, AppState>) -> AppRe
 #[tauri::command]
 pub fn update_card(input: UpdateCardInput, state: State<'_, AppState>) -> AppResult<()> {
     state.lock()?.update_card(input)
+}
+
+#[tauri::command]
+pub fn create_research_role(
+    input: CreateResearchRoleInput,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    state.lock()?.create_research_role(input)
+}
+
+#[tauri::command]
+pub fn update_research_role(
+    input: UpdateResearchRoleInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_research_role(input)
+}
+
+#[tauri::command]
+pub fn set_research_role_archived(
+    research_role_id: String,
+    archived: bool,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .lock()?
+        .set_research_role_archived(&research_role_id, archived)
+}
+
+#[tauri::command]
+pub fn reorder_research_roles(
+    project_id: String,
+    ordered_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .lock()?
+        .reorder_research_roles(&project_id, &ordered_ids)
 }
 
 #[tauri::command]

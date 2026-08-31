@@ -30,14 +30,6 @@ interface LibraryViewProps {
   onOpenSource: (documentId: string, page: number | null, locatorJson: string) => void
 }
 
-const roleLabels: Record<ProjectCardView['role'], string> = {
-  unset: '暂未判断',
-  support: '支持',
-  oppose: '反对',
-  qualify: '限定',
-  background: '背景'
-}
-
 const libraryCardPreviewCount = 10
 
 export function LibraryView({
@@ -229,9 +221,15 @@ export function LibraryView({
                       </div>
                       <div className="library-card-body">
                         <div className="card-topline">
-                          <span className={`role-pill role-${card.role}`}>
-                            {roleLabels[card.role]}
-                          </span>
+                          {card.researchRoles.length > 0 ? card.researchRoles.map((role) => (
+                            <span
+                              className="role-pill"
+                              key={role.id}
+                              style={{ '--role-color': role.color } as React.CSSProperties}
+                            >
+                              {role.name}
+                            </span>
+                          )) : <span className="soft-pill">未设置研究作用</span>}
                           {card.rawText !== card.displayText ? (
                             <span className="soft-pill">保留原始版本</span>
                           ) : null}
@@ -327,6 +325,7 @@ export function LibraryView({
       {editingCard ? (
         <CardEditDialog
           card={editingCard}
+          researchRoles={snapshot.researchRoles}
           onSave={saveCard}
           onClose={() => setEditingCard(null)}
           onOpenSource={() => onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson)}

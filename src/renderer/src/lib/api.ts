@@ -7,6 +7,7 @@ import type {
   CreatePdfAnnotationInput,
   CreateProjectInput,
   CreateReadingNoteInput,
+  CreateResearchRoleInput,
   DatabaseImportResult,
   ImportPdfInput,
   ImportPdfResult,
@@ -18,6 +19,7 @@ import type {
   UpdateDocumentInput,
   UpdateOutlineNodeInput,
   UpdateProjectInput,
+  UpdateResearchRoleInput,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -62,6 +64,14 @@ export const api: InkstoneApi = {
   deleteReadingNote: (noteId: string) =>
     invoke<void>('delete_reading_note', { noteId }),
   updateCard: (input: UpdateCardInput) => invoke<void>('update_card', { input }),
+  createResearchRole: (input: CreateResearchRoleInput) =>
+    invoke<string>('create_research_role', { input }),
+  updateResearchRole: (input: UpdateResearchRoleInput) =>
+    invoke<void>('update_research_role', { input }),
+  setResearchRoleArchived: (researchRoleId: string, archived: boolean) =>
+    invoke<void>('set_research_role_archived', { researchRoleId, archived }),
+  reorderResearchRoles: (projectId: string, orderedIds: string[]) =>
+    invoke<void>('reorder_research_roles', { projectId, orderedIds }),
   moveCard: (cardId: string, categoryId: string) =>
     invoke<void>('move_card', { cardId, categoryId }),
   setCardExcluded: (cardId: string, excluded: boolean) =>

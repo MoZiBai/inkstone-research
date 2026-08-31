@@ -18,6 +18,7 @@ import {
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type {
   ProjectCardView,
+  ResearchRole,
   SynthesisCategory,
   UpdateCardInput,
   WorkspaceSnapshot
@@ -36,14 +37,6 @@ interface SynthesisViewProps {
   initialMode: 'active' | 'excluded'
   onFocusHandled: () => void
   onOpenSource: (documentId: string, page: number | null, locatorJson: string) => void
-}
-
-const roleLabels: Record<ProjectCardView['role'], string> = {
-  unset: '暂未判断',
-  support: '支持',
-  oppose: '反对',
-  qualify: '限定',
-  background: '背景'
 }
 
 const synthesisCardTransferType = 'application/x-inkstone-synthesis-card'
@@ -68,6 +61,7 @@ export function SynthesisView({
   )
   const [editingCard, setEditingCard] = useState<ProjectCardView | null>(null)
   const [editingCategory, setEditingCategory] = useState<SynthesisCategory | 'new' | null>(null)
+  const [showResearchRoleManager, setShowResearchRoleManager] = useState(false)
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
   const activeCards = useMemo(
@@ -237,6 +231,9 @@ export function SynthesisView({
           <button className="button secondary" type="button" onClick={() => setEditingCategory('new')}>
             <Plus size={15} /> 新建分类
           </button>
+          <button className="button secondary" type="button" onClick={() => setShowResearchRoleManager(true)}>
+            <SlidersHorizontal size={15} /> 研究作用
+          </button>
         </div>
       </header>
 
@@ -358,7 +355,17 @@ export function SynthesisView({
                         <blockquote>{card.displayText}</blockquote>
                         {card.comment ? <p>{card.comment}</p> : null}
                         <div className="card-meta-row">
-                          <span className={`role-pill role-${card.role}`}>{roleLabels[card.role]}</span>
+                          <div className="research-role-pills">
+                            {card.researchRoles.length > 0 ? card.researchRoles.map((role) => (
+                              <span
+                                className="role-pill"
+                                key={role.id}
+                                style={{ '--role-color': role.color } as React.CSSProperties}
+                              >
+                                {role.name}
+                              </span>
+                            )) : <span className="soft-pill">未设置作用</span>}
+                          </div>
                           <button type="button" onClick={() => setEditingCard(card)}>
                             <Edit3 size={13} /> 编辑
                           </button>
@@ -474,6 +481,7 @@ export function SynthesisView({
       {editingCard ? (
         <CardEditDialog
           card={editingCard}
+          researchRoles={snapshot.researchRoles}
           onSave={saveCard}
           onClose={() => setEditingCard(null)}
           onOpenSource={() => onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson)}
@@ -490,7 +498,130 @@ export function SynthesisView({
           onClose={() => setEditingCategory(null)}
         />
       ) : null}
+      {showResearchRoleManager && snapshot.currentProjectId ? (
+        <ResearchRoleManager
+          projectId={snapshot.currentProjectId}
+          roles={snapshot.researchRoles}
+          runMutation={runMutation}
+          onClose={() => setShowResearchRoleManager(false)}
+        />
+      ) : null}
     </div>
+  )
+}
+
+interface ResearchRoleManagerProps {
+  projectId: string
+  roles: ResearchRole[]
+  runMutation: RunMutation
+  onClose: () => void
+}
+
+function ResearchRoleManager({
+  projectId,
+  roles,
+  runMutation,
+  onClose
+}: ResearchRoleManagerProps): React.JSX.Element {
+  const [editing, setEditing] = useState<ResearchRole | 'new' | null>(null)
+  const [name, setName] = useState('')
+  const [color, setColor] = useState('#8a6757')
+
+  const beginEditing = (role: ResearchRole | 'new'): void => {
+    setEditing(role)
+    setName(role === 'new' ? '' : role.name)
+    setColor(role === 'new' ? '#8a6757' : role.color)
+  }
+
+  const saveRole = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault()
+    if (!editing) return
+    const succeeded = editing === 'new'
+      ? await runMutation(
+          () => api.createResearchRole({ projectId, name, color }),
+          '研究作用已创建。'
+        )
+      : await runMutation(
+          () => api.updateResearchRole({ researchRoleId: editing.id, name, color }),
+          '研究作用已更新。'
+        )
+    if (succeeded) setEditing(null)
+  }
+
+  const moveRole = async (roleId: string, direction: -1 | 1): Promise<void> => {
+    const ids = roles.map((role) => role.id)
+    const current = ids.indexOf(roleId)
+    const next = current + direction
+    if (current < 0 || next < 0 || next >= ids.length) return
+    ;[ids[current], ids[next]] = [ids[next] as string, ids[current] as string]
+    await runMutation(() => api.reorderResearchRoles(projectId, ids), '研究作用顺序已保存。')
+  }
+
+  return (
+    <Modal
+      title="管理研究作用"
+      subtitle="研究作用属于当前项目；一张卡片可以同时选择多个。归档不会移除已有卡片关联。"
+      onClose={onClose}
+      width="large"
+    >
+      <div className="research-role-manager">
+        <div className="research-role-manager-toolbar">
+          <button className="button secondary" type="button" onClick={() => beginEditing('new')}>
+            <Plus size={14} /> 新建研究作用
+          </button>
+        </div>
+        {editing ? (
+          <form className="research-role-editor" onSubmit={(event) => void saveRole(event)}>
+            <label className="field">
+              <span>名称</span>
+              <input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} />
+            </label>
+            <label className="field color-field">
+              <span>颜色</span>
+              <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
+              <code>{color}</code>
+            </label>
+            <div className="compact-actions">
+              <button className="button ghost" type="button" onClick={() => setEditing(null)}>取消</button>
+              <button className="button primary" type="submit">{editing === 'new' ? '创建' : '保存'}</button>
+            </div>
+          </form>
+        ) : null}
+        <div className="research-role-manager-list">
+          {roles.map((role, index) => (
+            <div className={role.isArchived ? 'archived' : ''} key={role.id}>
+              <i style={{ backgroundColor: role.color }} />
+              <span>
+                <strong>{role.name}</strong>
+                <small>{role.isArchived ? '已归档 · 已有关联继续保留' : role.isDefault ? '默认快捷项' : '自定义作用'}</small>
+              </span>
+              <button type="button" disabled={index === 0} onClick={() => void moveRole(role.id, -1)} title="上移">
+                <ArrowLeft size={13} />
+              </button>
+              <button type="button" disabled={index === roles.length - 1} onClick={() => void moveRole(role.id, 1)} title="下移">
+                <ArrowRight size={13} />
+              </button>
+              <button type="button" onClick={() => beginEditing(role)} title="编辑">
+                <Edit3 size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void runMutation(
+                  () => api.setResearchRoleArchived(role.id, !role.isArchived),
+                  role.isArchived ? '研究作用已重新启用。' : '研究作用已归档，已有卡片关联继续保留。'
+                )}
+              >
+                {role.isArchived ? <RotateCcw size={13} /> : <ArchiveX size={13} />}
+                {role.isArchived ? '启用' : '归档'}
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="button primary" type="button" onClick={onClose}>完成</button>
+        </div>
+      </div>
+    </Modal>
   )
 }
 

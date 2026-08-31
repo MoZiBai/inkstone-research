@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,11 +11,12 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, DocumentSummary,
-    ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink, OutlineNode,
-    OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
-    RemoveDocumentInput, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput, WorkspaceSnapshot,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink,
+    OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
+    RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
+    UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput, UpdateResearchRoleInput,
+    WorkspaceSnapshot,
 };
 
 use super::schema::{migrate_database, seed_database, SCHEMA_VERSION};
@@ -83,6 +84,7 @@ impl Repository {
                 current_project_id: None,
                 documents: Vec::new(),
                 categories: Vec::new(),
+                research_roles: Vec::new(),
                 cards: Vec::new(),
                 pdf_annotations: Vec::new(),
                 reading_notes: Vec::new(),
@@ -160,7 +162,21 @@ impl Repository {
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        let cards = {
+        let research_roles = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT id, project_id, name, color, sort_order, is_default, is_archived,
+                       created_at, updated_at
+                FROM research_roles
+                WHERE project_id = ?1
+                ORDER BY is_archived, sort_order, created_at
+                "#,
+            )?;
+            let rows = statement.query_map(params![project_id], research_role_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut cards = {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT pc.id, pc.project_id, pc.excerpt_id,
@@ -169,7 +185,7 @@ impl Repository {
                        COALESCE(NULLIF(pc.text_override, ''), se.clean_text),
                        se.pdf_page, se.print_page,
                        se.locator_json, se.context_before, se.context_after, se.source_hash,
-                       pc.comment, pc.role, pc.category_id, pc.synthesis_state,
+                       pc.comment, pc.origin_kind, pc.category_id, pc.synthesis_state,
                        COALESCE(GROUP_CONCAT(t.name, char(31)), ''),
                        pc.created_at, pc.updated_at
                 FROM project_cards pc
@@ -207,7 +223,8 @@ impl Repository {
                     context_after: row.get(14)?,
                     source_hash: row.get(15)?,
                     comment: row.get(16)?,
-                    role: row.get(17)?,
+                    origin_kind: row.get(17)?,
+                    research_roles: Vec::new(),
                     category_id: row.get(18)?,
                     synthesis_state: row.get(19)?,
                     tags,
@@ -217,6 +234,46 @@ impl Repository {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+
+        let roles_by_card = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT pcr.project_card_id,
+                       rr.id, rr.project_id, rr.name, rr.color, rr.sort_order,
+                       rr.is_default, rr.is_archived, rr.created_at, rr.updated_at
+                FROM project_card_roles pcr
+                JOIN project_cards pc ON pc.id = pcr.project_card_id
+                JOIN research_roles rr ON rr.id = pcr.research_role_id
+                WHERE pc.project_id = ?1
+                ORDER BY pcr.project_card_id, rr.sort_order, rr.created_at
+                "#,
+            )?;
+            let rows = statement.query_map(params![project_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ResearchRole {
+                        id: row.get(1)?,
+                        project_id: row.get(2)?,
+                        name: row.get(3)?,
+                        color: row.get(4)?,
+                        sort_order: row.get(5)?,
+                        is_default: row.get::<_, i64>(6)? == 1,
+                        is_archived: row.get::<_, i64>(7)? == 1,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                    },
+                ))
+            })?;
+            let mut result = BTreeMap::<String, Vec<ResearchRole>>::new();
+            for row in rows {
+                let (card_id, role) = row?;
+                result.entry(card_id).or_default().push(role);
+            }
+            result
+        };
+        for card in &mut cards {
+            card.research_roles = roles_by_card.get(&card.id).cloned().unwrap_or_default();
+        }
 
         let pdf_annotations = {
             let mut statement = self.connection.prepare(
@@ -329,6 +386,7 @@ impl Repository {
             current_project_id,
             documents,
             categories,
+            research_roles,
             cards,
             pdf_annotations,
             reading_notes,
@@ -372,6 +430,7 @@ impl Repository {
             "#,
             params![category_id, project_id, now],
         )?;
+        write_default_research_roles(&transaction, &project_id, &now)?;
         transaction.commit()?;
         Ok(project_id)
     }
@@ -1021,7 +1080,6 @@ impl Repository {
         &mut self,
         input: CreateCardFromSelectionInput,
     ) -> AppResult<String> {
-        validate_role(&input.role)?;
         validate_selection_text(&input.raw_text)?;
         let display_text = required_long_text(&input.display_text, "卡片摘录文字", 50_000)?;
         validate_locator(&input.locator_json, input.pdf_page)?;
@@ -1035,31 +1093,31 @@ impl Repository {
         )?;
         let now = timestamp();
         let transaction = self.connection.transaction()?;
-        if let Some(note_id) = input.source_reading_note_id.as_deref() {
-            let matches_source: i64 = transaction.query_row(
-                r#"
-                SELECT EXISTS(
-                  SELECT 1 FROM reading_notes
-                  WHERE id = ?1 AND project_id = ?2 AND document_id = ?3
-                    AND selected_text = ?4 AND page_number = ?5 AND locator_json = ?6
-                )
+        let origin_kind = if let Some(note_id) = input.source_reading_note_id.as_deref() {
+            transaction
+                .query_row(
+                    r#"
+                SELECT kind FROM reading_notes
+                WHERE id = ?1 AND project_id = ?2 AND document_id = ?3
+                  AND selected_text = ?4 AND page_number = ?5 AND locator_json = ?6
                 "#,
-                params![
-                    note_id,
-                    input.project_id,
-                    input.document_id,
-                    input.raw_text,
-                    input.pdf_page,
-                    input.locator_json
-                ],
-                |row| row.get(0),
-            )?;
-            if matches_source == 0 {
-                return Err(AppError::Validation(
-                    "待转换的阅读笔记与当前 PDF 原文位置不匹配。".into(),
-                ));
-            }
-        }
+                    params![
+                        note_id,
+                        input.project_id,
+                        input.document_id,
+                        input.raw_text,
+                        input.pdf_page,
+                        input.locator_json
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    AppError::Validation("待转换的阅读笔记与当前 PDF 原文位置不匹配。".into())
+                })?
+        } else {
+            "normal".to_owned()
+        };
         let excerpt_id = transaction
             .query_row(
                 r#"
@@ -1108,6 +1166,20 @@ impl Repository {
             )?;
         }
 
+        if transaction
+            .query_row(
+                "SELECT id FROM project_cards WHERE project_id = ?1 AND excerpt_id = ?2",
+                params![input.project_id, excerpt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(AppError::Validation(
+                "这段原文已经存在研究卡片；原阅读笔记仍已保留。".into(),
+            ));
+        }
+
         ensure_selection_highlight(
             &transaction,
             &input.project_id,
@@ -1117,22 +1189,6 @@ impl Repository {
             &input.locator_json,
             &now,
         )?;
-
-        if let Some(note_id) = input.source_reading_note_id.as_deref() {
-            transaction.execute("DELETE FROM reading_notes WHERE id = ?1", params![note_id])?;
-        }
-
-        if let Some(existing_card_id) = transaction
-            .query_row(
-                "SELECT id FROM project_cards WHERE project_id = ?1 AND excerpt_id = ?2",
-                params![input.project_id, excerpt_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            transaction.commit()?;
-            return Ok(existing_card_id);
-        }
 
         let category_id: String = transaction
             .query_row(
@@ -1154,9 +1210,9 @@ impl Repository {
         transaction.execute(
             r#"
             INSERT INTO project_cards
-              (id, project_id, excerpt_id, text_override, comment, role, category_id,
-               synthesis_state, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8)
+              (id, project_id, excerpt_id, text_override, comment, category_id,
+               synthesis_state, origin_kind, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8)
             "#,
             params![
                 card_id,
@@ -1164,8 +1220,8 @@ impl Repository {
                 excerpt_id,
                 text_override,
                 input.comment.trim(),
-                input.role,
                 category_id,
+                origin_kind,
                 now
             ],
         )?;
@@ -1176,6 +1232,9 @@ impl Repository {
             normalized_tags,
             &now,
         )?;
+        if let Some(note_id) = input.source_reading_note_id.as_deref() {
+            transaction.execute("DELETE FROM reading_notes WHERE id = ?1", params![note_id])?;
+        }
         transaction.commit()?;
         Ok(card_id)
     }
@@ -1288,53 +1347,199 @@ impl Repository {
     }
 
     pub fn update_card(&mut self, input: UpdateCardInput) -> AppResult<()> {
-        validate_role(&input.role)?;
-        let normalized_tags = input
-            .tags
+        let display_text = required_long_text(&input.display_text, "卡片摘录文字", 50_000)?;
+        let normalized_tags = normalize_tags(&input.tags)?;
+        let research_role_ids = input
+            .research_role_ids
             .iter()
-            .map(|tag| tag.trim())
-            .filter(|tag| !tag.is_empty())
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        if normalized_tags.len() > 24 {
-            return Err(AppError::Validation("单张卡片最多使用 24 个标签。".into()));
+        if research_role_ids.len() > 24 {
+            return Err(AppError::Validation(
+                "单张卡片最多使用 24 个研究作用。".into(),
+            ));
         }
+        let print_page = input
+            .print_page
+            .as_deref()
+            .map(|value| limited_text(value, "印刷页码", 80))
+            .transpose()?
+            .filter(|value| !value.is_empty());
 
         let now = timestamp();
         let transaction = self.connection.transaction()?;
-        let project_id: String = transaction
+        let (project_id, excerpt_id, clean_text): (String, String, String) = transaction
             .query_row(
-                "SELECT project_id FROM project_cards WHERE id = ?1",
+                r#"
+                SELECT pc.project_id, pc.excerpt_id, se.clean_text
+                FROM project_cards pc
+                JOIN source_excerpts se ON se.id = pc.excerpt_id
+                WHERE pc.id = ?1
+                "#,
                 params![input.card_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or_else(|| AppError::NotFound("卡片".into()))?;
+        for role_id in &research_role_ids {
+            let valid: i64 = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM research_roles WHERE id = ?1 AND project_id = ?2)",
+                params![role_id, project_id],
+                |row| row.get(0),
+            )?;
+            if valid != 1 {
+                return Err(AppError::Validation(
+                    "所选研究作用不属于当前卡片项目。".into(),
+                ));
+            }
+        }
+        let text_override = if display_text == clean_text {
+            ""
+        } else {
+            display_text.as_str()
+        };
         transaction.execute(
-            "UPDATE project_cards SET comment = ?1, role = ?2, updated_at = ?3 WHERE id = ?4",
-            params![input.comment.trim(), input.role, now, input.card_id],
+            "UPDATE project_cards SET text_override = ?1, comment = ?2, updated_at = ?3 WHERE id = ?4",
+            params![text_override, input.comment.trim(), now, input.card_id],
+        )?;
+        transaction.execute(
+            "UPDATE source_excerpts SET print_page = ?1 WHERE id = ?2",
+            params![print_page, excerpt_id],
         )?;
         transaction.execute(
             "DELETE FROM project_card_tags WHERE project_card_id = ?1",
             params![input.card_id],
         )?;
-        for tag_name in normalized_tags {
+        write_card_tags(
+            &transaction,
+            &project_id,
+            &input.card_id,
+            normalized_tags,
+            &now,
+        )?;
+        transaction.execute(
+            "DELETE FROM project_card_roles WHERE project_card_id = ?1",
+            params![input.card_id],
+        )?;
+        for role_id in research_role_ids {
             transaction.execute(
                 r#"
-                INSERT INTO tags (id, project_id, name, created_at)
-                VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT(project_id, name) DO NOTHING
+                INSERT INTO project_card_roles
+                  (project_card_id, research_role_id, created_at)
+                VALUES (?1, ?2, ?3)
                 "#,
-                params![Uuid::new_v4().to_string(), project_id, tag_name, now],
+                params![input.card_id, role_id, now],
             )?;
-            let tag_id: String = transaction.query_row(
-                "SELECT id FROM tags WHERE project_id = ?1 AND name = ?2",
-                params![project_id, tag_name],
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn create_research_role(&mut self, input: CreateResearchRoleInput) -> AppResult<String> {
+        ensure_project_exists(&self.connection, &input.project_id)?;
+        let name = required_text(&input.name, "研究作用名称")?;
+        let color = validated_color(&input.color)?;
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM research_roles WHERE project_id = ?1 AND name = ?2)",
+            params![input.project_id, name],
+            |row| row.get(0),
+        )?;
+        if exists == 1 {
+            return Err(AppError::Validation("当前项目已经有同名研究作用。".into()));
+        }
+        let sort_order: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1000 FROM research_roles WHERE project_id = ?1",
+            params![input.project_id],
+            |row| row.get(0),
+        )?;
+        let id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        self.connection.execute(
+            r#"
+            INSERT INTO research_roles
+              (id, project_id, name, color, sort_order, is_default, is_archived,
+               created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?6)
+            "#,
+            params![id, input.project_id, name, color, sort_order, now],
+        )?;
+        Ok(id)
+    }
+
+    pub fn update_research_role(&mut self, input: UpdateResearchRoleInput) -> AppResult<()> {
+        let name = required_text(&input.name, "研究作用名称")?;
+        let color = validated_color(&input.color)?;
+        let project_id: String = self
+            .connection
+            .query_row(
+                "SELECT project_id FROM research_roles WHERE id = ?1",
+                params![input.research_role_id],
                 |row| row.get(0),
-            )?;
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("研究作用".into()))?;
+        let duplicate: i64 = self.connection.query_row(
+            r#"
+            SELECT EXISTS(
+              SELECT 1 FROM research_roles
+              WHERE project_id = ?1 AND name = ?2 AND id <> ?3
+            )
+            "#,
+            params![project_id, name, input.research_role_id],
+            |row| row.get(0),
+        )?;
+        if duplicate == 1 {
+            return Err(AppError::Validation("当前项目已经有同名研究作用。".into()));
+        }
+        self.connection.execute(
+            "UPDATE research_roles SET name = ?1, color = ?2, updated_at = ?3 WHERE id = ?4",
+            params![name, color, timestamp(), input.research_role_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_research_role_archived(
+        &mut self,
+        research_role_id: &str,
+        archived: bool,
+    ) -> AppResult<()> {
+        let changed = self.connection.execute(
+            "UPDATE research_roles SET is_archived = ?1, updated_at = ?2 WHERE id = ?3",
+            params![i64::from(archived), timestamp(), research_role_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("研究作用".into()));
+        }
+        Ok(())
+    }
+
+    pub fn reorder_research_roles(
+        &mut self,
+        project_id: &str,
+        ordered_ids: &[String],
+    ) -> AppResult<()> {
+        ensure_project_exists(&self.connection, project_id)?;
+        let existing = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT id FROM research_roles WHERE project_id = ?1")?;
+            let rows = statement.query_map(params![project_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<BTreeSet<_>, _>>()?
+        };
+        let requested = ordered_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if requested != existing || requested.len() != ordered_ids.len() {
+            return Err(AppError::Validation(
+                "研究作用排序必须包含当前项目的全部研究作用且不能重复。".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let now = timestamp();
+        for (index, id) in ordered_ids.iter().enumerate() {
             transaction.execute(
-                "INSERT INTO project_card_tags (project_card_id, tag_id) VALUES (?1, ?2)",
-                params![input.card_id, tag_id],
+                "UPDATE research_roles SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
+                params![(index as i64 + 1) * 1000, now, id],
             )?;
         }
         transaction.commit()?;
@@ -1822,9 +2027,16 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
             SELECT id, project_id, name, color, sort_order, is_default, created_at, updated_at
             FROM import_db.synthesis_categories;
 
+            INSERT OR IGNORE INTO research_roles
+              (id, project_id, name, color, sort_order, is_default, is_archived,
+               created_at, updated_at)
+            SELECT id, project_id, name, color, sort_order, is_default, is_archived,
+                   created_at, updated_at
+            FROM import_db.research_roles;
+
             INSERT OR IGNORE INTO project_cards
               (id, project_id, excerpt_id, text_override, comment, role, category_id,
-               synthesis_state, created_at, updated_at)
+               synthesis_state, origin_kind, created_at, updated_at)
             SELECT pc.id, pc.project_id, pc.excerpt_id, pc.text_override, pc.comment, pc.role,
                    CASE
                      WHEN pc.category_id IS NULL THEN NULL
@@ -1841,7 +2053,7 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
                        LIMIT 1
                      )
                    END,
-                   pc.synthesis_state, pc.created_at, pc.updated_at
+                   pc.synthesis_state, pc.origin_kind, pc.created_at, pc.updated_at
             FROM import_db.project_cards pc;
 
             INSERT OR IGNORE INTO tags (id, project_id, name, created_at)
@@ -1875,6 +2087,37 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
             SELECT project_card_id, tag_id
             FROM resolved_card_tags
             WHERE project_card_id IS NOT NULL AND tag_id IS NOT NULL;
+
+            WITH resolved_card_roles AS (
+              SELECT
+                COALESCE(
+                  (SELECT dc.id FROM main.project_cards dc
+                   WHERE dc.id = pcr.project_card_id),
+                  (SELECT dc.id
+                   FROM import_db.project_cards sc
+                   JOIN main.project_cards dc
+                     ON dc.project_id = sc.project_id AND dc.excerpt_id = sc.excerpt_id
+                   WHERE sc.id = pcr.project_card_id
+                   LIMIT 1)
+                ) AS project_card_id,
+                COALESCE(
+                  (SELECT dr.id FROM main.research_roles dr
+                   WHERE dr.id = pcr.research_role_id),
+                  (SELECT dr.id
+                   FROM import_db.research_roles sr
+                   JOIN main.research_roles dr
+                     ON dr.project_id = sr.project_id AND dr.name = sr.name
+                   WHERE sr.id = pcr.research_role_id
+                   LIMIT 1)
+                ) AS research_role_id,
+                pcr.created_at
+              FROM import_db.project_card_roles pcr
+            )
+            INSERT OR IGNORE INTO project_card_roles
+              (project_card_id, research_role_id, created_at)
+            SELECT project_card_id, research_role_id, created_at
+            FROM resolved_card_roles
+            WHERE project_card_id IS NOT NULL AND research_role_id IS NOT NULL;
 
             INSERT OR IGNORE INTO pdf_annotations
               (id, project_id, document_id, kind, page_number, color,
@@ -1971,6 +2214,10 @@ fn validate_database_file(path: &Path) -> AppResult<()> {
     }
     if version >= 6 {
         required_tables.push("app_metadata");
+    }
+    if version >= 7 {
+        required_tables.push("research_roles");
+        required_tables.push("project_card_roles");
     }
     for table in required_tables {
         let exists: i64 = connection.query_row(
@@ -2146,12 +2393,49 @@ fn validated_color(value: &str) -> AppResult<String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn validate_role(value: &str) -> AppResult<()> {
-    if ["unset", "support", "oppose", "qualify", "background"].contains(&value) {
-        Ok(())
-    } else {
-        Err(AppError::Validation("卡片作用无效。".into()))
+fn research_role_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResearchRole> {
+    Ok(ResearchRole {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        name: row.get(2)?,
+        color: row.get(3)?,
+        sort_order: row.get(4)?,
+        is_default: row.get::<_, i64>(5)? == 1,
+        is_archived: row.get::<_, i64>(6)? == 1,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn write_default_research_roles(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    now: &str,
+) -> AppResult<()> {
+    for (name, color, sort_order) in [
+        ("支持", "#5f7f69", 1000_i64),
+        ("反对", "#a65e52", 2000_i64),
+        ("限定", "#7b6d94", 3000_i64),
+        ("背景", "#687d8d", 4000_i64),
+    ] {
+        transaction.execute(
+            r#"
+            INSERT INTO research_roles
+              (id, project_id, name, color, sort_order, is_default, is_archived,
+               created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?6)
+            "#,
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                name,
+                color,
+                sort_order,
+                now
+            ],
+        )?;
     }
+    Ok(())
 }
 
 fn validate_selection_text(value: &str) -> AppResult<()> {
@@ -2695,6 +2979,18 @@ mod tests {
                         row.get::<_, i64>(0)
                     })
                     .expect("count outline links"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM research_roles", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count research roles"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM project_card_roles", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count card role links"),
             );
             let (_, created_on_repeat) = target
                 .import_database(&exported_path, &repeat_safety_path)
@@ -2731,6 +3027,18 @@ mod tests {
                         row.get::<_, i64>(0)
                     })
                     .expect("recount outline links"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM research_roles", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount research roles"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM project_card_roles", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount card role links"),
             );
             assert_eq!(counts_after_repeat, counts_before_repeat);
             ensure_foreign_keys_are_valid(&target.connection)
@@ -2844,7 +3152,6 @@ mod tests {
                 context_before: String::new(),
                 context_after: String::new(),
                 comment: "这条质疑应成为卡片评论。".into(),
-                role: "oppose".into(),
                 tags: vec!["质疑".into()],
                 source_reading_note_id: Some(note_id.clone()),
             })
@@ -2861,6 +3168,8 @@ mod tests {
             .expect("converted card");
         assert_eq!(card.display_text, "一段经人工校正的原文");
         assert_eq!(card.comment, "这条质疑应成为卡片评论。");
+        assert_eq!(card.origin_kind, "critique");
+        assert!(card.research_roles.is_empty());
         assert!(snapshot.pdf_annotations.iter().any(|annotation| {
             annotation.document_id == "seed-document-space"
                 && annotation.page_number == 9
@@ -3009,11 +3318,22 @@ mod tests {
         repository
             .set_card_excluded("seed-card-4", false)
             .expect("restore card");
+        let oppose_role_id = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace roles")
+            .research_roles
+            .into_iter()
+            .find(|role| role.name == "反对")
+            .expect("default oppose role")
+            .id;
         repository
             .update_card(UpdateCardInput {
                 card_id: "seed-card-4".into(),
+                display_text: "重复举行的纪念活动使墓地空间获得了超出单次埋葬行为的社会记忆。"
+                    .into(),
+                print_page: Some("57".into()),
                 comment: "更新后的项目评论".into(),
-                role: "oppose".into(),
+                research_role_ids: vec![oppose_role_id],
                 tags: vec!["仪式".into(), "空间".into()],
             })
             .expect("update card");
@@ -3053,7 +3373,8 @@ mod tests {
         assert_eq!(card.category_id.as_deref(), Some(category_id.as_str()));
         assert_eq!(card.synthesis_state, "active");
         assert_eq!(card.comment, "更新后的项目评论");
-        assert_eq!(card.role, "oppose");
+        assert_eq!(card.research_roles.len(), 1);
+        assert_eq!(card.research_roles[0].name, "反对");
         assert_eq!(
             card.tags.iter().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from(["仪式".to_owned(), "空间".to_owned(),])
@@ -3069,6 +3390,61 @@ mod tests {
         assert!(snapshot.outline_links.iter().any(|link| {
             link.project_card_id == "seed-card-4" && link.outline_node_id == second_node
         }));
+    }
+
+    #[test]
+    fn card_supports_multiple_project_roles_and_archived_roles_keep_links() {
+        let mut repository = Repository::memory().expect("memory database");
+        let custom_role_id = repository
+            .create_research_role(CreateResearchRoleInput {
+                project_id: "seed-project-tombs".into(),
+                name: "史料例证".into(),
+                color: "#825f4d".into(),
+            })
+            .expect("create custom role");
+        let support_role_id = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace roles")
+            .research_roles
+            .into_iter()
+            .find(|role| role.name == "支持")
+            .expect("support role")
+            .id;
+
+        repository
+            .update_card(UpdateCardInput {
+                card_id: "seed-card-1".into(),
+                display_text: "人工校正后的卡片显示文字".into(),
+                print_page: Some("103a".into()),
+                comment: "新的即时笔记".into(),
+                research_role_ids: vec![support_role_id, custom_role_id.clone()],
+                tags: vec!["空间".into()],
+            })
+            .expect("update card with multiple roles");
+        repository
+            .set_research_role_archived(&custom_role_id, true)
+            .expect("archive custom role");
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after role updates");
+        let card = snapshot
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("updated card");
+        let archived_role = card
+            .research_roles
+            .iter()
+            .find(|role| role.id == custom_role_id)
+            .expect("archived role remains linked");
+
+        assert_eq!(card.research_roles.len(), 2);
+        assert!(archived_role.is_archived);
+        assert_eq!(card.display_text, "人工校正后的卡片显示文字");
+        assert_ne!(card.raw_text, card.display_text);
+        assert_eq!(card.print_page.as_deref(), Some("103a"));
+        assert_eq!(card.comment, "新的即时笔记");
     }
 
     #[test]
@@ -3564,7 +3940,6 @@ mod tests {
                     context_before: "前文".into(),
                     context_after: "后文".into(),
                     comment: "用于验证重启后仍可回到原文。".into(),
-                    role: "support".into(),
                     tags: vec!["PDF".into(), "定位".into()],
                     source_reading_note_id: None,
                 })

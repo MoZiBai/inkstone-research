@@ -53,6 +53,20 @@ pub struct SynthesisCategory {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResearchRole {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub is_default: bool,
+    pub is_archived: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectCardView {
     pub id: String,
     pub project_id: String,
@@ -71,7 +85,8 @@ pub struct ProjectCardView {
     pub context_after: String,
     pub source_hash: Option<String>,
     pub comment: String,
-    pub role: String,
+    pub origin_kind: String,
+    pub research_roles: Vec<ResearchRole>,
     pub category_id: Option<String>,
     pub synthesis_state: String,
     pub tags: Vec<String>,
@@ -143,6 +158,7 @@ pub struct WorkspaceSnapshot {
     pub current_project_id: Option<String>,
     pub documents: Vec<DocumentSummary>,
     pub categories: Vec<SynthesisCategory>,
+    pub research_roles: Vec<ResearchRole>,
     pub cards: Vec<ProjectCardView>,
     pub pdf_annotations: Vec<PdfAnnotation>,
     pub reading_notes: Vec<ReadingNote>,
@@ -286,7 +302,6 @@ pub struct CreateCardFromSelectionInput {
     pub context_after: String,
     #[serde(default)]
     pub comment: String,
-    pub role: String,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -326,10 +341,29 @@ pub struct CreateReadingNoteInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCardInput {
     pub card_id: String,
+    pub display_text: String,
+    pub print_page: Option<String>,
     pub comment: String,
-    pub role: String,
+    #[serde(default)]
+    pub research_role_ids: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateResearchRoleInput {
+    pub project_id: String,
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateResearchRoleInput {
+    pub research_role_id: String,
+    pub name: String,
+    pub color: String,
 }
 
 #[derive(Debug, Deserialize)]

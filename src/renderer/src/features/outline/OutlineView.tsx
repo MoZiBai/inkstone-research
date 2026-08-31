@@ -448,6 +448,7 @@ export function OutlineView({
       {viewingCard ? (
         <CardEditDialog
           card={viewingCard}
+          researchRoles={snapshot.researchRoles}
           onSave={saveViewingCard}
           onClose={() => setViewingCard(null)}
           onOpenSource={() => onOpenSource(viewingCard.documentId, viewingCard.pdfPage, viewingCard.locatorJson)}

@@ -20,7 +20,6 @@ import {
 import { open } from '@tauri-apps/plugin-dialog'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  CardRole,
   BibliographicMetadataInput,
   DocumentSummary,
   ImportPdfResult,
@@ -71,14 +70,6 @@ interface ReadingViewProps {
   initialRequest?: ReadingFocusRequest | null
   onFocusHandled?: () => void
 }
-
-const roleOptions: Array<{ value: CardRole; label: string }> = [
-  { value: 'unset', label: '暂未判断' },
-  { value: 'support', label: '支持' },
-  { value: 'oppose', label: '反对' },
-  { value: 'qualify', label: '限定' },
-  { value: 'background', label: '背景' }
-]
 
 interface MetadataDraft {
   title: string
@@ -472,7 +463,6 @@ export function ReadingView({
   const saveCardFromSelection = async (input: {
     displayText: string
     comment: string
-    role: CardRole
     tags: string[]
     printPage: string
   }): Promise<void> => {
@@ -491,7 +481,6 @@ export function ReadingView({
           contextBefore: selection.contextBefore,
           contextAfter: selection.contextAfter,
           comment: input.comment,
-          role: input.role,
           tags: input.tags,
           sourceReadingNoteId: pendingCard.sourceReadingNoteId
         }),
@@ -1044,6 +1033,7 @@ export function ReadingView({
         <CreateCardDialog
           selection={pendingCard.selection}
           initialComment={pendingCard.initialComment}
+          availableTags={Array.from(new Set(snapshot.cards.flatMap((card) => card.tags))).sort()}
           onSave={saveCardFromSelection}
           onClose={() => setPendingCard(null)}
         />
@@ -1492,14 +1482,20 @@ function ReadingNoteDialog({ kind, selection, onSave, onClose }: ReadingNoteDial
 interface CreateCardDialogProps {
   selection: PdfSelection
   initialComment: string
-  onSave: (input: { displayText: string; comment: string; role: CardRole; tags: string[]; printPage: string }) => Promise<void>
+  availableTags: string[]
+  onSave: (input: { displayText: string; comment: string; tags: string[]; printPage: string }) => Promise<void>
   onClose: () => void
 }
 
-function CreateCardDialog({ selection, initialComment, onSave, onClose }: CreateCardDialogProps): React.JSX.Element {
+function CreateCardDialog({
+  selection,
+  initialComment,
+  availableTags,
+  onSave,
+  onClose
+}: CreateCardDialogProps): React.JSX.Element {
   const [displayText, setDisplayText] = useState(selection.text)
   const [comment, setComment] = useState(initialComment)
-  const [role, setRole] = useState<CardRole>('unset')
   const [tags, setTags] = useState('')
   const [printPage, setPrintPage] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1511,7 +1507,6 @@ function CreateCardDialog({ selection, initialComment, onSave, onClose }: Create
       await onSave({
         displayText,
         comment,
-        role,
         printPage,
         tags: tags
           .split(/[、,，]/)
@@ -1543,44 +1538,20 @@ function CreateCardDialog({ selection, initialComment, onSave, onClose }: Create
           />
           <small>这里只调整卡片显示文字；PDF 原始选区、页码、高亮和定位不会改变。</small>
         </label>
-        {displayText !== selection.text ? (
-          <details className="original-selection-details">
-            <summary>查看未修改的 PDF 选区文字</summary>
-            <blockquote className="dialog-quote compact">{selection.text}</blockquote>
-          </details>
-        ) : null}
-        <div className="source-context">
-          <div>
-            <span>前文</span>
-            <p>{selection.contextBefore || '暂无可识别的前文'}</p>
-          </div>
-          <div>
-            <span>后文</span>
-            <p>{selection.contextAfter || '暂无可识别的后文'}</p>
-          </div>
-        </div>
-        <div className="form-grid two-columns">
-          <label className="field">
-            <span>研究作用</span>
-            <select value={role} onChange={(event) => setRole(event.target.value as CardRole)}>
-              {roleOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>印刷页码（可选）</span>
-            <input value={printPage} onChange={(event) => setPrintPage(event.target.value)} placeholder="例如 103" />
-          </label>
-        </div>
         <label className="field">
-          <span>标签（使用顿号或逗号分隔）</span>
-          <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="空间组织、仪式" />
+          <span>标签 <small>可选用已有标签，也可直接输入新标签</small></span>
+          <input
+            list="create-card-tag-options"
+            value={tags}
+            onChange={(event) => setTags(event.target.value)}
+            placeholder="空间组织、仪式"
+          />
+          <datalist id="create-card-tag-options">
+            {availableTags.map((tag) => <option key={tag} value={tag} />)}
+          </datalist>
         </label>
         <label className="field">
-          <span>我的即时评论</span>
+          <span>即时笔记</span>
           <textarea
             rows={5}
             value={comment}
@@ -1588,6 +1559,35 @@ function CreateCardDialog({ selection, initialComment, onSave, onClose }: Create
             placeholder="记录这段材料为什么重要、如何使用或有哪些疑问……"
           />
         </label>
+        <details className="card-source-details">
+          <summary>来源与更多信息</summary>
+          <div className="form-grid two-columns">
+            <label className="field">
+              <span>PDF 页码与定位</span>
+              <input value={`第 ${selection.pageNumber} 页 · 已保存原文坐标`} readOnly />
+            </label>
+            <label className="field">
+              <span>印刷页码（可选）</span>
+              <input value={printPage} onChange={(event) => setPrintPage(event.target.value)} placeholder="例如 103" />
+            </label>
+          </div>
+          {displayText !== selection.text ? (
+            <div className="original-selection-details">
+              <span>未修改的 PDF 选区文字</span>
+              <blockquote className="dialog-quote compact">{selection.text}</blockquote>
+            </div>
+          ) : null}
+          <div className="source-context">
+            <div>
+              <span>前文</span>
+              <p>{selection.contextBefore || '暂无可识别的前文'}</p>
+            </div>
+            <div>
+              <span>后文</span>
+              <p>{selection.contextAfter || '暂无可识别的后文'}</p>
+            </div>
+          </div>
+        </details>
         <div className="modal-actions">
           <button className="button ghost" type="button" onClick={onClose}>
             取消

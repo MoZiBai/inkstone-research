@@ -4499,3 +4499,186 @@ body.reading-panel-resizing * {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Flexible card roles and source details */
+.role-pill {
+  color: var(--role-color, var(--ink-600));
+  border: 1px solid color-mix(in srgb, var(--role-color, var(--ink-500)) 28%, transparent);
+  background: color-mix(in srgb, var(--role-color, var(--paper-200)) 10%, white);
+}
+
+.research-role-pills {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.card-source-details {
+  margin: 4px 0 16px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(247, 245, 239, 0.48);
+}
+
+.card-source-details > summary {
+  padding: 12px 0;
+  color: var(--ink-700);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.card-source-details[open] > summary {
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.card-detail-origin-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  color: var(--ink-500);
+  font-size: 12px;
+}
+
+.origin-insight {
+  color: #6e6539;
+  background: #f2ecd2;
+}
+
+.origin-critique {
+  color: #8d5049;
+  background: #f1deda;
+}
+
+.research-role-picker {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.research-role-picker legend {
+  padding: 0 5px;
+  color: var(--ink-600);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.research-role-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.research-role-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: white;
+  cursor: pointer;
+}
+
+.research-role-options label.archived {
+  opacity: 0.65;
+}
+
+.research-role-options i,
+.research-role-manager-list i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.research-role-options small {
+  color: var(--ink-500);
+}
+
+.research-role-manager-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.research-role-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper-100);
+}
+
+.research-role-editor .field,
+.research-role-editor .color-field {
+  margin: 0;
+}
+
+.research-role-manager-list {
+  display: grid;
+  gap: 7px;
+  max-height: 390px;
+  overflow: auto;
+}
+
+.research-role-manager-list > div {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) repeat(4, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.research-role-manager-list > div.archived {
+  opacity: 0.62;
+  background: var(--paper-150);
+}
+
+.research-role-manager-list span {
+  display: grid;
+  gap: 2px;
+}
+
+.research-role-manager-list small {
+  color: var(--ink-500);
+  font-size: 11px;
+}
+
+.research-role-manager-list button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 29px;
+  padding: 0 7px;
+  color: var(--ink-600);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+}
+
+.compact-actions {
+  display: flex;
+  gap: 6px;
+}
+
+@media (max-width: 760px) {
+  .research-role-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .research-role-manager-list > div {
+    grid-template-columns: 12px minmax(0, 1fr) repeat(2, auto);
+  }
+}

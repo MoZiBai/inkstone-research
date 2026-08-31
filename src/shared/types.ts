@@ -1,5 +1,5 @@
-export type CardRole = 'unset' | 'support' | 'oppose' | 'qualify' | 'background'
 export type SynthesisState = 'active' | 'excluded'
+export type CardOriginKind = 'normal' | 'insight' | 'critique'
 export type OutlinePlacement = 'before' | 'inside' | 'after'
 export type PdfAnnotationKind = 'highlight' | 'underline'
 export type ReadingNoteKind = 'insight' | 'critique'
@@ -49,6 +49,18 @@ export interface SynthesisCategory {
   updatedAt: string
 }
 
+export interface ResearchRole {
+  id: string
+  projectId: string
+  name: string
+  color: string
+  sortOrder: number
+  isDefault: boolean
+  isArchived: boolean
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ProjectCardView {
   id: string
   projectId: string
@@ -67,7 +79,8 @@ export interface ProjectCardView {
   contextAfter: string
   sourceHash: string | null
   comment: string
-  role: CardRole
+  originKind: CardOriginKind
+  researchRoles: ResearchRole[]
   categoryId: string | null
   synthesisState: SynthesisState
   tags: string[]
@@ -143,6 +156,7 @@ export interface WorkspaceSnapshot {
   currentProjectId: string | null
   documents: DocumentSummary[]
   categories: SynthesisCategory[]
+  researchRoles: ResearchRole[]
   cards: ProjectCardView[]
   pdfAnnotations: PdfAnnotation[]
   readingNotes: ReadingNote[]
@@ -219,7 +233,6 @@ export interface CreateCardFromSelectionInput {
   contextBefore?: string
   contextAfter?: string
   comment?: string
-  role: CardRole
   tags?: string[]
   sourceReadingNoteId?: string | null
 }
@@ -247,9 +260,23 @@ export interface CreateReadingNoteInput {
 
 export interface UpdateCardInput {
   cardId: string
+  displayText: string
+  printPage?: string | null
   comment: string
-  role: CardRole
+  researchRoleIds: string[]
   tags: string[]
+}
+
+export interface CreateResearchRoleInput {
+  projectId: string
+  name: string
+  color: string
+}
+
+export interface UpdateResearchRoleInput {
+  researchRoleId: string
+  name: string
+  color: string
 }
 
 export interface CreateCategoryInput {
@@ -306,6 +333,10 @@ export interface InkstoneApi {
   createReadingNote: (input: CreateReadingNoteInput) => Promise<string>
   deleteReadingNote: (noteId: string) => Promise<void>
   updateCard: (input: UpdateCardInput) => Promise<void>
+  createResearchRole: (input: CreateResearchRoleInput) => Promise<string>
+  updateResearchRole: (input: UpdateResearchRoleInput) => Promise<void>
+  setResearchRoleArchived: (researchRoleId: string, archived: boolean) => Promise<void>
+  reorderResearchRoles: (projectId: string, orderedIds: string[]) => Promise<void>
   moveCard: (cardId: string, categoryId: string) => Promise<void>
   setCardExcluded: (cardId: string, excluded: boolean) => Promise<void>
   deleteCard: (cardId: string) => Promise<void>

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -234,6 +234,76 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+
+    if current_version < 7 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS research_roles (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              color TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+              is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE (project_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS project_card_roles (
+              project_card_id TEXT NOT NULL REFERENCES project_cards(id) ON DELETE CASCADE,
+              research_role_id TEXT NOT NULL REFERENCES research_roles(id) ON DELETE CASCADE,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (project_card_id, research_role_id)
+            );
+
+            ALTER TABLE project_cards ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'normal'
+              CHECK (origin_kind IN ('normal', 'insight', 'critique'));
+
+            INSERT OR IGNORE INTO research_roles
+              (id, project_id, name, color, sort_order, is_default, is_archived,
+               created_at, updated_at)
+            SELECT 'default-role-' || id || '-support', id, '支持', '#5f7f69', 1000, 1, 0,
+                   created_at, updated_at
+            FROM projects
+            UNION ALL
+            SELECT 'default-role-' || id || '-oppose', id, '反对', '#a65e52', 2000, 1, 0,
+                   created_at, updated_at
+            FROM projects
+            UNION ALL
+            SELECT 'default-role-' || id || '-qualify', id, '限定', '#7b6d94', 3000, 1, 0,
+                   created_at, updated_at
+            FROM projects
+            UNION ALL
+            SELECT 'default-role-' || id || '-background', id, '背景', '#687d8d', 4000, 1, 0,
+                   created_at, updated_at
+            FROM projects;
+
+            INSERT OR IGNORE INTO project_card_roles
+              (project_card_id, research_role_id, created_at)
+            SELECT pc.id, rr.id, pc.created_at
+            FROM project_cards pc
+            JOIN research_roles rr
+              ON rr.project_id = pc.project_id
+             AND rr.name = CASE pc.role
+               WHEN 'support' THEN '支持'
+               WHEN 'oppose' THEN '反对'
+               WHEN 'qualify' THEN '限定'
+               WHEN 'background' THEN '背景'
+             END
+            WHERE pc.role <> 'unset';
+
+            CREATE INDEX IF NOT EXISTS idx_research_roles_project
+              ON research_roles(project_id, is_archived, sort_order);
+            CREATE INDEX IF NOT EXISTS idx_project_card_roles_card
+              ON project_card_roles(project_card_id);
+            CREATE INDEX IF NOT EXISTS idx_project_card_roles_role
+              ON project_card_roles(research_role_id);
+            "#,
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -376,6 +446,36 @@ pub fn seed_database(connection: &mut Connection) -> Result<()> {
            'qualify', 'seed-category-region-inbox', 'active',
            '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z');
 
+        INSERT INTO research_roles
+          (id, project_id, name, color, sort_order, is_default, is_archived,
+           created_at, updated_at)
+        VALUES
+          ('seed-role-tombs-support', 'seed-project-tombs', '支持', '#5f7f69', 1000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-tombs-oppose', 'seed-project-tombs', '反对', '#a65e52', 2000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-tombs-qualify', 'seed-project-tombs', '限定', '#7b6d94', 3000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-tombs-background', 'seed-project-tombs', '背景', '#687d8d', 4000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-regions-support', 'seed-project-regions', '支持', '#5f7f69', 1000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-regions-oppose', 'seed-project-regions', '反对', '#a65e52', 2000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-regions-qualify', 'seed-project-regions', '限定', '#7b6d94', 3000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+          ('seed-role-regions-background', 'seed-project-regions', '背景', '#687d8d', 4000, 1, 0,
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z');
+
+        INSERT INTO project_card_roles (project_card_id, research_role_id, created_at)
+        VALUES
+          ('seed-card-1', 'seed-role-tombs-support', '2026-08-30T00:00:00Z'),
+          ('seed-card-2', 'seed-role-tombs-qualify', '2026-08-30T00:00:00Z'),
+          ('seed-card-3', 'seed-role-tombs-background', '2026-08-30T00:00:00Z'),
+          ('seed-card-4', 'seed-role-tombs-support', '2026-08-30T00:00:00Z'),
+          ('seed-card-5', 'seed-role-tombs-qualify', '2026-08-30T00:00:00Z'),
+          ('seed-card-6', 'seed-role-regions-qualify', '2026-08-30T00:00:00Z');
+
         INSERT INTO tags (id, project_id, name, created_at)
         VALUES
           ('seed-tag-space', 'seed-project-tombs', '墓葬空间', '2026-08-30T00:00:00Z'),
@@ -428,4 +528,81 @@ pub fn seed_database(connection: &mut Connection) -> Result<()> {
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_six_roles_are_migrated_to_project_scoped_relations() {
+        let mut connection = Connection::open_in_memory().expect("memory database");
+        connection
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE project_cards (
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                  role TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                INSERT INTO projects VALUES ('project-old', '2025-01-01', '2025-01-02');
+                INSERT INTO project_cards VALUES ('card-support', 'project-old', 'support', '2025-01-03');
+                INSERT INTO project_cards VALUES ('card-unset', 'project-old', 'unset', '2025-01-04');
+                PRAGMA user_version = 6;
+                "#,
+            )
+            .expect("version six fixture");
+
+        migrate_database(&mut connection).expect("migrate database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let role_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM research_roles WHERE project_id = 'project-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("default roles");
+        let migrated_name: String = connection
+            .query_row(
+                r#"
+                SELECT rr.name
+                FROM project_card_roles pcr
+                JOIN research_roles rr ON rr.id = pcr.research_role_id
+                WHERE pcr.project_card_id = 'card-support'
+                "#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated support role");
+        let unset_links: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM project_card_roles WHERE project_card_id = 'card-unset'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("unset links");
+        let origin_kind: String = connection
+            .query_row(
+                "SELECT origin_kind FROM project_cards WHERE id = 'card-support'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("origin kind");
+
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(role_count, 4);
+        assert_eq!(migrated_name, "支持");
+        assert_eq!(unset_links, 0);
+        assert_eq!(origin_kind, "normal");
+    }
 }
