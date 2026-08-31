@@ -59,7 +59,10 @@ export default function App(): React.JSX.Element {
   const [removingProject, setRemovingProject] = useState<ProjectSummary | null>(null)
   const [showDatabaseDialog, setShowDatabaseDialog] = useState(false)
   const [databaseBusy, setDatabaseBusy] = useState(false)
-  const [pendingDatabaseImport, setPendingDatabaseImport] = useState<string | null>(null)
+  const [pendingDatabaseImport, setPendingDatabaseImport] = useState<{
+    path: string
+    mode: 'database' | 'project'
+  } | null>(null)
   const [databaseImportResult, setDatabaseImportResult] = useState<DatabaseImportResult | null>(null)
   const [focusCardId, setFocusCardId] = useState<string | null>(null)
   const [synthesisMode, setSynthesisMode] = useState<'active' | 'excluded'>('active')
@@ -200,15 +203,15 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  const chooseDatabaseImport = async (): Promise<void> => {
+  const chooseDatabaseImport = async (mode: 'database' | 'project'): Promise<void> => {
     try {
       const source = await openDialog({
-        title: '选择砚台数据库备份',
+        title: mode === 'project' ? '选择单项目数据库' : '选择要合并的砚台数据库备份',
         multiple: false,
         directory: false,
-        filters: [{ name: '砚台数据库备份', extensions: ['db'] }]
+        filters: [{ name: mode === 'project' ? '砚台项目数据库' : '砚台数据库备份', extensions: ['db'] }]
       })
-      if (typeof source === 'string') setPendingDatabaseImport(source)
+      if (typeof source === 'string') setPendingDatabaseImport({ path: source, mode })
     } catch (error) {
       notify(normalizeError(error))
     }
@@ -216,13 +219,19 @@ export default function App(): React.JSX.Element {
 
   const importDatabase = async (): Promise<void> => {
     if (!pendingDatabaseImport) return
+    const pendingImport = pendingDatabaseImport
     const resultHolder: { value: DatabaseImportResult | null } = { value: null }
     setDatabaseBusy(true)
     const succeeded = await runMutation(
       async () => {
-        resultHolder.value = await api.importDatabase(pendingDatabaseImport)
+        resultHolder.value =
+          pendingImport.mode === 'project'
+            ? await api.importProjectDatabase(pendingImport.path)
+            : await api.importDatabase(pendingImport.path)
       },
-      '数据库备份已导入，项目状态已重新载入。'
+      pendingImport.mode === 'project'
+        ? '项目已加入当前资料库，原有项目保持不变。'
+        : '数据库备份已合并，原有项目保持不变。'
     )
     setDatabaseBusy(false)
     if (succeeded && resultHolder.value) {
@@ -557,16 +566,29 @@ export default function App(): React.JSX.Element {
         <DatabaseTransferDialog
           busy={databaseBusy || mutating}
           onExport={() => void exportDatabase()}
-          onImport={() => void chooseDatabaseImport()}
+          onMerge={() => void chooseDatabaseImport('database')}
+          onImportProject={() => void chooseDatabaseImport('project')}
           onClose={() => setShowDatabaseDialog(false)}
         />
       ) : null}
 
       {pendingDatabaseImport ? (
         <ConfirmDialog
-          title="导入并替换当前数据库？"
-          description={`即将导入“${fileName(pendingDatabaseImport)}”。砚台会先自动备份当前数据库；导入文件不会包含 PDF，缺失文献可在阅读台重新链接。`}
-          confirmLabel={databaseBusy ? '正在导入…' : '确认导入'}
+          title={
+            pendingDatabaseImport.mode === 'project'
+              ? '把这个项目加入当前资料库？'
+              : '把备份合并到当前资料库？'
+          }
+          description={
+            pendingDatabaseImport.mode === 'project'
+              ? `即将导入“${fileName(pendingDatabaseImport.path)}”。现有项目不会被删除或覆盖；同源数据会按稳定 ID 合并。项目数据库不包含 PDF，缺失文件可稍后重新链接。`
+              : `即将合并“${fileName(pendingDatabaseImport.path)}”。当前资料库会先自动备份，现有项目不会被删除或覆盖，备份中缺少的项目与研究数据会被补充进来。`
+          }
+          confirmLabel={
+            databaseBusy
+              ? pendingDatabaseImport.mode === 'project' ? '正在导入项目…' : '正在合并…'
+              : pendingDatabaseImport.mode === 'project' ? '确认导入项目' : '确认合并'
+          }
           onConfirm={() => {
             if (!databaseBusy) void importDatabase()
           }}
@@ -593,20 +615,22 @@ export default function App(): React.JSX.Element {
 interface DatabaseTransferDialogProps {
   busy: boolean
   onExport: () => void
-  onImport: () => void
+  onMerge: () => void
+  onImportProject: () => void
   onClose: () => void
 }
 
 function DatabaseTransferDialog({
   busy,
   onExport,
-  onImport,
+  onMerge,
+  onImportProject,
   onClose
 }: DatabaseTransferDialogProps): React.JSX.Element {
   return (
     <Modal
-      title="数据库备份与恢复"
-      subtitle="备份包含全部研究数据；PDF 管理副本不打包，可在恢复后重新链接。"
+      title="数据库备份与导入"
+      subtitle="所有导入都采用非破坏性合并；现有项目不会因导入文件内容不完整而消失。"
       onClose={onClose}
       width="large"
     >
@@ -618,17 +642,24 @@ function DatabaseTransferDialog({
             <small>保存项目、卡片、标注、阅读笔记、二次整理和论文提纲。</small>
           </span>
         </button>
-        <button type="button" disabled={busy} onClick={onImport}>
+        <button type="button" disabled={busy} onClick={onImportProject}>
           <span className="database-transfer-icon"><Upload size={20} /></span>
           <span>
-            <strong>导入数据库备份</strong>
-            <small>验证备份后替换当前资料库，并先自动保存当前数据库。</small>
+            <strong>导入单个项目</strong>
+            <small>导入项目级数据库，保留当前资料库中的所有已有项目。</small>
+          </span>
+        </button>
+        <button className="database-merge-option" type="button" disabled={busy} onClick={onMerge}>
+          <span className="database-transfer-icon"><DatabaseBackup size={20} /></span>
+          <span>
+            <strong>合并完整数据库备份</strong>
+            <small>把备份中的项目和研究数据补充进来，不删除或覆盖当前内容。</small>
           </span>
         </button>
       </div>
       <div className="database-transfer-note">
         <ShieldCheck size={16} />
-        <span>导出使用 SQLite 一致性快照；导入前会检查文件完整性与数据关联。</span>
+        <span>导出使用 SQLite 一致性快照；导入前会检查文件并自动保存当前数据库。</span>
       </div>
     </Modal>
   )
@@ -642,17 +673,25 @@ function DatabaseImportResultDialog({
   onClose: () => void
 }): React.JSX.Element {
   return (
-    <Modal title="数据库恢复完成" onClose={onClose} width="medium">
+    <Modal title="数据库合并完成" onClose={onClose} width="medium">
       <div className="database-import-result">
         <ShieldCheck size={28} />
-        <p>卡片、标注、阅读笔记、二次整理和提纲结构已从备份恢复。</p>
+        <p>现有项目保持不变；文件中的项目、卡片、标注、二次整理和提纲已安全合并。</p>
         <dl>
+          <div>
+            <dt>文件中项目</dt>
+            <dd>{result.sourceProjectCount} 个</dd>
+          </div>
+          <div>
+            <dt>新增项目</dt>
+            <dd>{result.createdProjectCount} 个</dd>
+          </div>
           <div>
             <dt>缺失 PDF</dt>
             <dd>{result.missingPdfCount} 篇</dd>
           </div>
           <div>
-            <dt>导入前自动备份</dt>
+            <dt>合并前自动备份</dt>
             <dd title={result.safetyBackupPath}>{result.safetyBackupPath}</dd>
           </div>
         </dl>

@@ -46,6 +46,8 @@ export const api: InkstoneApi = {
     invoke<string>('export_database', { destinationPath }),
   importDatabase: (sourcePath: string) =>
     invoke<DatabaseImportResult>('import_database', { sourcePath }),
+  importProjectDatabase: (sourcePath: string) =>
+    invoke<DatabaseImportResult>('import_project_database', { sourcePath }),
   readPdf: (documentId: string) => invoke<ArrayBuffer>('read_pdf', { documentId }),
   revealPdfInFileManager: (documentId: string) =>
     invoke<void>('reveal_pdf_in_file_manager', { documentId }),

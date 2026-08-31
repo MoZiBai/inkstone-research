@@ -698,6 +698,10 @@ select:focus-visible {
   transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
 }
 
+.database-transfer-options > .database-merge-option {
+  grid-column: 1 / -1;
+}
+
 .database-transfer-options > button:hover:not(:disabled) {
   border-color: rgba(164, 95, 69, 0.3);
   background: #fffaf4;
@@ -3472,6 +3476,14 @@ body.reading-panel-resizing * {
 }
 
 @media (max-width: 700px) {
+  .database-transfer-options {
+    grid-template-columns: 1fr;
+  }
+
+  .database-transfer-options > .database-merge-option {
+    grid-column: auto;
+  }
+
   .app-shell,
   .app-shell.sidebar-collapsed {
     grid-template-columns: 68px minmax(0, 1fr);

@@ -44,6 +44,7 @@ pub fn run() {
             commands::export_database,
             commands::export_project_database,
             commands::import_database,
+            commands::import_project_database,
             commands::read_pdf,
             commands::reveal_pdf_in_file_manager,
             commands::create_card_from_selection,

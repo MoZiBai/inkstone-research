@@ -926,43 +926,83 @@ impl Repository {
         result
     }
 
-    pub fn import_database(&mut self, source: &Path, safety_backup: &Path) -> AppResult<()> {
-        validate_database_file(source)?;
-        self.export_database(safety_backup)?;
+    pub fn import_database(
+        &mut self,
+        source: &Path,
+        safety_backup: &Path,
+    ) -> AppResult<(i64, i64)> {
+        self.merge_database(source, safety_backup, false)
+    }
 
+    pub fn import_project_database(
+        &mut self,
+        source: &Path,
+        safety_backup: &Path,
+    ) -> AppResult<(i64, i64)> {
+        self.merge_database(source, safety_backup, true)
+    }
+
+    fn merge_database(
+        &mut self,
+        source: &Path,
+        safety_backup: &Path,
+        require_single_project: bool,
+    ) -> AppResult<(i64, i64)> {
+        validate_database_file(source)?;
         let database_parent = safety_backup
             .parent()
-            .ok_or_else(|| AppError::Validation("无法确定数据库恢复目录。".into()))?;
-        let prepared = database_parent.join(format!(".inkstone-import-{}.tmp", Uuid::new_v4()));
-        let import_result = (|| -> AppResult<()> {
+            .ok_or_else(|| AppError::Validation("无法确定数据库导入目录。".into()))?;
+        let prepared = database_parent.join(format!(".inkstone-merge-{}.tmp", Uuid::new_v4()));
+        let prepare_result = (|| -> AppResult<Vec<String>> {
             fs::copy(source, &prepared)?;
-            {
-                let mut prepared_connection = Connection::open(&prepared)?;
-                migrate_database(&mut prepared_connection)?;
-                ensure_foreign_keys_are_valid(&prepared_connection)?;
-            }
-            validate_database_file(&prepared)?;
-            restore_database_copy(&mut self.connection, &prepared)?;
-            migrate_database(&mut self.connection)?;
-            ensure_foreign_keys_are_valid(&self.connection)?;
-            Ok(())
-        })();
-
-        let _ = fs::remove_file(&prepared);
-        if let Err(import_error) = import_result {
-            let rollback_result = restore_database_copy(&mut self.connection, safety_backup)
-                .and_then(|_| migrate_database(&mut self.connection).map_err(AppError::from));
-            return match rollback_result {
-                Ok(()) => Err(AppError::Validation(format!(
-                    "导入失败，当前资料库已自动恢复：{import_error}"
-                ))),
-                Err(rollback_error) => Err(AppError::Validation(format!(
-                    "导入失败且自动恢复未完成。原资料库备份位于 {}。导入错误：{import_error}；恢复错误：{rollback_error}",
-                    safety_backup.display()
-                ))),
+            let mut prepared_connection = Connection::open(&prepared)?;
+            migrate_database(&mut prepared_connection)?;
+            ensure_foreign_keys_are_valid(&prepared_connection)?;
+            let project_ids = {
+                let mut statement = prepared_connection
+                    .prepare("SELECT id FROM projects ORDER BY sort_order, created_at")?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
             };
+            prepared_connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            validate_database_file(&prepared)?;
+            Ok(project_ids)
+        })();
+        let source_project_ids = match prepare_result {
+            Ok(project_ids) => project_ids,
+            Err(error) => {
+                remove_sqlite_temporary_files(&prepared);
+                return Err(error);
+            }
+        };
+        if source_project_ids.is_empty() {
+            remove_sqlite_temporary_files(&prepared);
+            return Err(AppError::Validation("导入文件中没有研究项目。".into()));
         }
-        Ok(())
+        if require_single_project && source_project_ids.len() != 1 {
+            remove_sqlite_temporary_files(&prepared);
+            return Err(AppError::Validation(format!(
+                "项目导入文件应只包含 1 个项目，但当前文件包含 {} 个。请改用“合并数据库备份”。",
+                source_project_ids.len()
+            )));
+        }
+
+        let existing_project_ids = {
+            let mut statement = self.connection.prepare("SELECT id FROM projects")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<BTreeSet<_>, _>>()?
+        };
+        let created_project_count = source_project_ids
+            .iter()
+            .filter(|project_id| !existing_project_ids.contains(*project_id))
+            .count() as i64;
+
+        self.export_database(safety_backup)?;
+        let merge_result = merge_database_copy(&mut self.connection, &prepared);
+        remove_sqlite_temporary_files(&prepared);
+        merge_result?;
+        ensure_foreign_keys_are_valid(&self.connection)?;
+        Ok((source_project_ids.len() as i64, created_project_count))
     }
 
     pub fn document_pdf_paths(&self) -> AppResult<Vec<PathBuf>> {
@@ -1736,13 +1776,164 @@ fn create_database_copy(source: &Connection, destination: &Path) -> AppResult<()
     Ok(())
 }
 
-fn restore_database_copy(destination: &mut Connection, source: &Path) -> AppResult<()> {
-    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let backup = Backup::new(&source_connection, destination)?;
-    backup.run_to_completion(128, Duration::from_millis(10), None)?;
-    drop(backup);
-    destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    Ok(())
+fn remove_sqlite_temporary_files(path: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut exact_path = path.as_os_str().to_os_string();
+        exact_path.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(exact_path));
+    }
+}
+
+fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult<()> {
+    destination.execute(
+        "ATTACH DATABASE ?1 AS import_db",
+        params![source.to_string_lossy()],
+    )?;
+    let merge_result = (|| -> AppResult<()> {
+        let transaction = destination.transaction()?;
+        transaction.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO projects
+              (id, name, description, color, sort_order, created_at, updated_at)
+            SELECT id, name, description, color, sort_order, created_at, updated_at
+            FROM import_db.projects;
+
+            INSERT OR IGNORE INTO documents
+              (id, title, authors, year, file_path, file_hash, created_at, updated_at,
+               journal, volume, issue, pages, doi, publisher, metadata_raw)
+            SELECT id, title, authors, year, file_path, file_hash, created_at, updated_at,
+                   journal, volume, issue, pages, doi, publisher, metadata_raw
+            FROM import_db.documents;
+
+            INSERT OR IGNORE INTO project_documents
+              (project_id, document_id, sort_order, created_at, removed_at)
+            SELECT project_id, document_id, sort_order, created_at, removed_at
+            FROM import_db.project_documents;
+
+            INSERT OR IGNORE INTO source_excerpts
+              (id, document_id, raw_text, clean_text, pdf_page, print_page,
+               locator_json, context_before, context_after, source_hash, created_at)
+            SELECT id, document_id, raw_text, clean_text, pdf_page, print_page,
+                   locator_json, context_before, context_after, source_hash, created_at
+            FROM import_db.source_excerpts;
+
+            INSERT OR IGNORE INTO synthesis_categories
+              (id, project_id, name, color, sort_order, is_default, created_at, updated_at)
+            SELECT id, project_id, name, color, sort_order, is_default, created_at, updated_at
+            FROM import_db.synthesis_categories;
+
+            INSERT OR IGNORE INTO project_cards
+              (id, project_id, excerpt_id, text_override, comment, role, category_id,
+               synthesis_state, created_at, updated_at)
+            SELECT pc.id, pc.project_id, pc.excerpt_id, pc.text_override, pc.comment, pc.role,
+                   CASE
+                     WHEN pc.category_id IS NULL THEN NULL
+                     WHEN EXISTS(
+                       SELECT 1 FROM main.synthesis_categories dc
+                       WHERE dc.id = pc.category_id
+                     ) THEN pc.category_id
+                     ELSE (
+                       SELECT dc.id
+                       FROM import_db.synthesis_categories sc
+                       JOIN main.synthesis_categories dc
+                         ON dc.project_id = pc.project_id AND dc.name = sc.name
+                       WHERE sc.id = pc.category_id
+                       LIMIT 1
+                     )
+                   END,
+                   pc.synthesis_state, pc.created_at, pc.updated_at
+            FROM import_db.project_cards pc;
+
+            INSERT OR IGNORE INTO tags (id, project_id, name, created_at)
+            SELECT id, project_id, name, created_at
+            FROM import_db.tags;
+
+            WITH resolved_card_tags AS (
+              SELECT
+                COALESCE(
+                  (SELECT dc.id FROM main.project_cards dc
+                   WHERE dc.id = pct.project_card_id),
+                  (SELECT dc.id
+                   FROM import_db.project_cards sc
+                   JOIN main.project_cards dc
+                     ON dc.project_id = sc.project_id AND dc.excerpt_id = sc.excerpt_id
+                   WHERE sc.id = pct.project_card_id
+                   LIMIT 1)
+                ) AS project_card_id,
+                COALESCE(
+                  (SELECT dt.id FROM main.tags dt WHERE dt.id = pct.tag_id),
+                  (SELECT dt.id
+                   FROM import_db.tags st
+                   JOIN main.tags dt
+                     ON dt.project_id = st.project_id AND dt.name = st.name
+                   WHERE st.id = pct.tag_id
+                   LIMIT 1)
+                ) AS tag_id
+              FROM import_db.project_card_tags pct
+            )
+            INSERT OR IGNORE INTO project_card_tags (project_card_id, tag_id)
+            SELECT project_card_id, tag_id
+            FROM resolved_card_tags
+            WHERE project_card_id IS NOT NULL AND tag_id IS NOT NULL;
+
+            INSERT OR IGNORE INTO pdf_annotations
+              (id, project_id, document_id, kind, page_number, color,
+               selected_text, locator_json, comment, created_at, updated_at)
+            SELECT id, project_id, document_id, kind, page_number, color,
+                   selected_text, locator_json, comment, created_at, updated_at
+            FROM import_db.pdf_annotations;
+
+            INSERT OR IGNORE INTO reading_notes
+              (id, project_id, document_id, kind, content, selected_text,
+               page_number, locator_json, created_at, updated_at)
+            SELECT id, project_id, document_id, kind, content, selected_text,
+                   page_number, locator_json, created_at, updated_at
+            FROM import_db.reading_notes;
+
+            INSERT OR IGNORE INTO outline_nodes
+              (id, project_id, parent_id, title, notes, core_argument,
+               open_questions, sort_order, created_at, updated_at)
+            SELECT id, project_id, parent_id, title, notes, core_argument,
+                   open_questions, sort_order, created_at, updated_at
+            FROM import_db.outline_nodes;
+
+            WITH resolved_outline_links AS (
+              SELECT
+                sl.id,
+                sl.outline_node_id,
+                COALESCE(
+                  (SELECT dc.id FROM main.project_cards dc
+                   WHERE dc.id = sl.project_card_id),
+                  (SELECT dc.id
+                   FROM import_db.project_cards sc
+                   JOIN main.project_cards dc
+                     ON dc.project_id = sc.project_id AND dc.excerpt_id = sc.excerpt_id
+                   WHERE sc.id = sl.project_card_id
+                   LIMIT 1)
+                ) AS project_card_id,
+                sl.note,
+                sl.sort_order,
+                sl.created_at
+              FROM import_db.outline_card_links sl
+            )
+            INSERT OR IGNORE INTO outline_card_links
+              (id, outline_node_id, project_card_id, note, sort_order, created_at)
+            SELECT id, outline_node_id, project_card_id, note, sort_order, created_at
+            FROM resolved_outline_links
+            WHERE project_card_id IS NOT NULL;
+
+            INSERT OR IGNORE INTO app_metadata (key, value)
+            SELECT key, value FROM import_db.app_metadata;
+            "#,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let detach_result = destination
+        .execute_batch("DETACH DATABASE import_db")
+        .map_err(AppError::from);
+    merge_result?;
+    detach_result
 }
 
 fn validate_database_file(path: &Path) -> AppResult<()> {
@@ -2364,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    fn database_export_and_import_preserve_workspace_and_create_safety_backup() {
+    fn full_database_merge_preserves_existing_data_and_is_idempotent() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-database-transfer")
@@ -2374,8 +2565,9 @@ mod tests {
         let exported_path = root.join("exported.db");
         let target_path = root.join("target.db");
         let safety_path = root.join("before-import.db");
+        let repeat_safety_path = root.join("before-repeat-import.db");
 
-        let (note_id, annotation_id) = {
+        let (note_id, annotation_id, source_only_project) = {
             let mut source = Repository::open(&source_path).expect("open source repository");
             source
                 .connection
@@ -2414,10 +2606,17 @@ mod tests {
                     comment: String::new(),
                 })
                 .expect("create source annotation");
+            let source_only_project = source
+                .create_project(CreateProjectInput {
+                    name: "备份文件独有项目".into(),
+                    description: "用于验证完整备份合并会补充缺失项目。".into(),
+                    color: Some("#456789".into()),
+                })
+                .expect("create source-only project");
             source
                 .export_database(&exported_path)
                 .expect("export consistent database copy");
-            (note_id, annotation_id)
+            (note_id, annotation_id, source_only_project)
         };
 
         {
@@ -2429,9 +2628,11 @@ mod tests {
                     color: None,
                 })
                 .expect("create target-only project");
-            target
+            let (source_project_count, created_project_count) = target
                 .import_database(&exported_path, &safety_path)
                 .expect("import complete database");
+            assert_eq!(source_project_count, 3);
+            assert_eq!(created_project_count, 1);
 
             let restored = target
                 .get_workspace(Some("seed-project-tombs"))
@@ -2446,18 +2647,94 @@ mod tests {
                     .cards
                     .iter()
                     .find(|card| card.id == "seed-card-1")
-                    .expect("restored corrected card")
+                    .expect("existing target card")
                     .display_text,
-                "人工修正后的摘录"
+                "墓葬空间并非被动地反映社会关系，而是在仪式实践中持续参与关系的生产。"
             );
             assert!(restored
                 .outline_links
                 .iter()
                 .any(|link| link.id == "seed-link-1"));
-            assert!(!restored
+            assert!(restored
                 .projects
                 .iter()
                 .any(|project| project.id == target_only_project));
+            assert!(restored
+                .projects
+                .iter()
+                .any(|project| project.id == source_only_project));
+
+            let counts_before_repeat = (
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM projects", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count projects"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM project_cards", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count cards"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM pdf_annotations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count annotations"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM reading_notes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count reading notes"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM outline_card_links", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count outline links"),
+            );
+            let (_, created_on_repeat) = target
+                .import_database(&exported_path, &repeat_safety_path)
+                .expect("repeat complete database merge");
+            assert_eq!(created_on_repeat, 0);
+            let counts_after_repeat = (
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM projects", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount projects"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM project_cards", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount cards"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM pdf_annotations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount annotations"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM reading_notes", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount reading notes"),
+                target
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM outline_card_links", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("recount outline links"),
+            );
+            assert_eq!(counts_after_repeat, counts_before_repeat);
+            ensure_foreign_keys_are_valid(&target.connection)
+                .expect("foreign keys after repeated merge");
 
             let safety = Repository::open(&safety_path).expect("open automatic safety backup");
             assert!(safety
@@ -2951,6 +3228,223 @@ mod tests {
         }
 
         fs::remove_dir_all(root).expect("remove project export directory");
+    }
+
+    #[test]
+    fn single_project_import_restores_all_project_relations_without_removing_others() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-project-import")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create project import directory");
+        let source_path = root.join("source.db");
+        let project_export_path = root.join("project.db");
+        let target_path = root.join("target.db");
+        let safety_path = root.join("before-project-import.db");
+
+        let (note_id, annotation_id) = {
+            let mut source = Repository::open(&source_path).expect("open source repository");
+            source
+                .connection
+                .execute(
+                    "UPDATE documents SET file_path = 'missing-after-transfer.pdf', file_hash = 'project-import-hash' WHERE id = 'seed-document-space'",
+                    [],
+                )
+                .expect("attach source PDF metadata");
+            source
+                .connection
+                .execute(
+                    "UPDATE project_cards SET text_override = '项目导入保留的人工修正文' WHERE id = 'seed-card-1'",
+                    [],
+                )
+                .expect("customize source card");
+            let note_id = source
+                .create_reading_note(CreateReadingNoteInput {
+                    project_id: "seed-project-tombs".into(),
+                    document_id: "seed-document-space".into(),
+                    kind: "critique".into(),
+                    content: "项目导入应保留这条质疑。".into(),
+                    selected_text: String::new(),
+                    page_number: None,
+                    locator_json: String::new(),
+                })
+                .expect("create source project note");
+            let annotation_id = source
+                .create_pdf_annotation(CreatePdfAnnotationInput {
+                    project_id: "seed-project-tombs".into(),
+                    document_id: "seed-document-space".into(),
+                    kind: "highlight".into(),
+                    page_number: 8,
+                    color: "#e8bd55".into(),
+                    selected_text: "项目导入批注".into(),
+                    locator_json: r#"{"version":1,"page":8,"rects":[{"x":0.12,"y":0.22,"width":0.25,"height":0.04}]}"#.into(),
+                    comment: "项目导入批注说明".into(),
+                })
+                .expect("create source project annotation");
+            source
+                .export_project_database("seed-project-tombs", &project_export_path)
+                .expect("export one project");
+            (note_id, annotation_id)
+        };
+
+        {
+            let mut target = Repository::open(&target_path).expect("open project import target");
+            target
+                .remove_project("seed-project-tombs")
+                .expect("remove project before restore test");
+            let target_only_project = target
+                .create_project(CreateProjectInput {
+                    name: "导入目标中原有项目".into(),
+                    description: String::new(),
+                    color: None,
+                })
+                .expect("create target-only project");
+
+            let result = target
+                .import_project_database(&project_export_path, &safety_path)
+                .expect("import single project");
+            assert_eq!(result, (1, 1));
+            let restored = target
+                .get_workspace(Some("seed-project-tombs"))
+                .expect("load imported project");
+            assert!(restored
+                .projects
+                .iter()
+                .any(|project| project.id == "seed-project-regions"));
+            assert!(restored
+                .projects
+                .iter()
+                .any(|project| project.id == target_only_project));
+            assert_eq!(
+                restored
+                    .cards
+                    .iter()
+                    .find(|card| card.id == "seed-card-1")
+                    .expect("imported project card")
+                    .display_text,
+                "项目导入保留的人工修正文"
+            );
+            assert!(restored.reading_notes.iter().any(|note| note.id == note_id));
+            assert!(restored
+                .pdf_annotations
+                .iter()
+                .any(|annotation| annotation.id == annotation_id));
+            assert!(restored
+                .outline_links
+                .iter()
+                .any(|link| link.id == "seed-link-1"));
+            ensure_foreign_keys_are_valid(&target.connection)
+                .expect("foreign keys after project import");
+        }
+
+        fs::remove_dir_all(root).expect("remove project import directory");
+    }
+
+    #[test]
+    fn project_export_merged_through_full_backup_entry_keeps_existing_projects() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-project-import-through-merge")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create wrong-entry import directory");
+        let source_path = root.join("source.db");
+        let project_export_path = root.join("project.db");
+        let target_path = root.join("target.db");
+        let safety_path = root.join("before-merge.db");
+
+        {
+            let source = Repository::open(&source_path).expect("open export source");
+            source
+                .export_project_database("seed-project-tombs", &project_export_path)
+                .expect("export one project");
+        }
+        {
+            let mut target = Repository::open(&target_path).expect("open merge target");
+            target
+                .remove_project("seed-project-tombs")
+                .expect("remove project before merge");
+            let target_only_project = target
+                .create_project(CreateProjectInput {
+                    name: "不能因误选入口而消失".into(),
+                    description: String::new(),
+                    color: None,
+                })
+                .expect("create protected project");
+            assert_eq!(
+                target
+                    .import_database(&project_export_path, &safety_path)
+                    .expect("merge project export through full backup entry"),
+                (1, 1)
+            );
+            let snapshot = target
+                .get_workspace(Some("seed-project-tombs"))
+                .expect("workspace after safe merge");
+            assert!(snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == target_only_project));
+            assert!(snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == "seed-project-regions"));
+            ensure_foreign_keys_are_valid(&target.connection)
+                .expect("foreign keys after wrong-entry merge");
+        }
+
+        fs::remove_dir_all(root).expect("remove wrong-entry import directory");
+    }
+
+    #[test]
+    fn single_project_entry_rejects_multi_project_database_without_changes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-reject-multi-project-import")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create rejection test directory");
+        let source_path = root.join("source.db");
+        let exported_path = root.join("complete.db");
+        let target_path = root.join("target.db");
+        let safety_path = root.join("should-not-exist.db");
+
+        {
+            let source = Repository::open(&source_path).expect("open complete export source");
+            source
+                .export_database(&exported_path)
+                .expect("export multi-project database");
+        }
+        {
+            let mut target = Repository::open(&target_path).expect("open rejection target");
+            let protected_project = target
+                .create_project(CreateProjectInput {
+                    name: "验证失败时保持不变".into(),
+                    description: String::new(),
+                    color: None,
+                })
+                .expect("create protected project");
+            let project_count_before: i64 = target
+                .connection
+                .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+                .expect("count projects before rejection");
+            let error = target
+                .import_project_database(&exported_path, &safety_path)
+                .expect_err("reject multi-project file in project entry");
+            assert!(
+                matches!(error, AppError::Validation(message) if message.contains("只包含 1 个项目"))
+            );
+            let snapshot = target
+                .get_workspace(Some(&protected_project))
+                .expect("workspace after rejected import");
+            assert_eq!(snapshot.projects.len() as i64, project_count_before);
+            assert!(snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == protected_project));
+            assert!(!safety_path.exists());
+            ensure_foreign_keys_are_valid(&target.connection)
+                .expect("foreign keys after rejected import");
+        }
+
+        fs::remove_dir_all(root).expect("remove rejection test directory");
     }
 
     #[test]

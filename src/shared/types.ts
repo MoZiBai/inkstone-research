@@ -204,6 +204,8 @@ export interface ImportPdfResult {
 export interface DatabaseImportResult {
   safetyBackupPath: string
   missingPdfCount: number
+  sourceProjectCount: number
+  createdProjectCount: number
 }
 
 export interface CreateCardFromSelectionInput {
@@ -295,6 +297,7 @@ export interface InkstoneApi {
   importPdf: (input: ImportPdfInput) => Promise<ImportPdfResult>
   exportDatabase: (destinationPath: string) => Promise<string>
   importDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
+  importProjectDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   readPdf: (documentId: string) => Promise<ArrayBuffer>
   revealPdfInFileManager: (documentId: string) => Promise<void>
   createCardFromSelection: (input: CreateCardFromSelectionInput) => Promise<string>

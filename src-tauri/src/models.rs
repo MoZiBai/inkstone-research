@@ -266,6 +266,8 @@ pub struct ImportPdfResult {
 pub struct DatabaseImportResult {
     pub safety_backup_path: String,
     pub missing_pdf_count: i64,
+    pub source_project_count: i64,
+    pub created_project_count: i64,
 }
 
 #[derive(Debug, Deserialize)]

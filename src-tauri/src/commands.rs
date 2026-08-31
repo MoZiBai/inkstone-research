@@ -220,26 +220,82 @@ pub async fn import_database(
     let repository = Arc::clone(&state.repository);
     let pdf_library_directory = state.pdf_library_directory.clone();
     let returned_safety_path = safety_backup.to_string_lossy().into_owned();
-    let missing_pdf_count = tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = repository.lock().map_err(|_| {
-            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
-        })?;
-        guard.import_database(&source, &safety_backup)?;
-        let paths = guard.document_pdf_paths()?;
-        Ok::<i64, crate::error::AppError>(
-            paths
+    let (source_project_count, created_project_count, missing_pdf_count) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| {
+                crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+            })?;
+            let (source_project_count, created_project_count) =
+                guard.import_database(&source, &safety_backup)?;
+            let paths = guard.document_pdf_paths()?;
+            let missing_pdf_count = paths
                 .iter()
                 .filter(|path| !managed_pdf_is_available(path, &pdf_library_directory))
-                .count() as i64,
-        )
-    })
-    .await
-    .map_err(|error| {
-        crate::error::AppError::Validation(format!("数据库导入任务失败：{error}"))
-    })??;
+                .count() as i64;
+            Ok::<(i64, i64, i64), crate::error::AppError>((
+                source_project_count,
+                created_project_count,
+                missing_pdf_count,
+            ))
+        })
+        .await
+        .map_err(|error| {
+            crate::error::AppError::Validation(format!("数据库导入任务失败：{error}"))
+        })??;
     Ok(DatabaseImportResult {
         safety_backup_path: returned_safety_path,
         missing_pdf_count,
+        source_project_count,
+        created_project_count,
+    })
+}
+
+#[tauri::command]
+pub async fn import_project_database(
+    source_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<DatabaseImportResult> {
+    let source = PathBuf::from(source_path);
+    if paths_refer_to_same_file(&source, &state.database_path) {
+        return Err(crate::error::AppError::Validation(
+            "不能把应用正在使用的数据库作为项目导入文件。".into(),
+        ));
+    }
+    let safety_backup = state.backup_directory.join(format!(
+        "inkstone-before-project-import-{}-{}.db",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        &Uuid::new_v4().to_string()[..8]
+    ));
+    let repository = Arc::clone(&state.repository);
+    let pdf_library_directory = state.pdf_library_directory.clone();
+    let returned_safety_path = safety_backup.to_string_lossy().into_owned();
+    let (source_project_count, created_project_count, missing_pdf_count) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| {
+                crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+            })?;
+            let (source_project_count, created_project_count) =
+                guard.import_project_database(&source, &safety_backup)?;
+            let paths = guard.document_pdf_paths()?;
+            let missing_pdf_count = paths
+                .iter()
+                .filter(|path| !managed_pdf_is_available(path, &pdf_library_directory))
+                .count() as i64;
+            Ok::<(i64, i64, i64), crate::error::AppError>((
+                source_project_count,
+                created_project_count,
+                missing_pdf_count,
+            ))
+        })
+        .await
+        .map_err(|error| {
+            crate::error::AppError::Validation(format!("项目数据库导入任务失败：{error}"))
+        })??;
+    Ok(DatabaseImportResult {
+        safety_backup_path: returned_safety_path,
+        missing_pdf_count,
+        source_project_count,
+        created_project_count,
     })
 }
 
