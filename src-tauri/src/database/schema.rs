@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -376,6 +376,19 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+
+    if current_version < 11 {
+        connection.execute(
+            r#"
+            UPDATE app_metadata
+            SET value = '24'
+            WHERE key = 'backup_automatic_interval_hours'
+              AND value NOT IN ('0', '24', '72', '168', '720')
+            "#,
+            [],
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -633,6 +646,10 @@ mod tests {
                   id TEXT PRIMARY KEY,
                   print_page TEXT
                 );
+                CREATE TABLE app_metadata (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
                 CREATE TABLE project_documents (
                   project_id TEXT NOT NULL,
                   document_id TEXT NOT NULL,
@@ -832,5 +849,36 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(override_value.as_deref(), Some("103"));
         assert_eq!(document_columns, 2);
+    }
+
+    #[test]
+    fn version_ten_database_normalizes_legacy_backup_intervals() {
+        let mut connection = Connection::open_in_memory().expect("memory database");
+        migrate_database(&mut connection).expect("create current schema");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO app_metadata (key, value)
+                VALUES ('backup_automatic_interval_hours', '6')
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                PRAGMA user_version = 10;
+                "#,
+            )
+            .expect("version ten backup settings fixture");
+
+        migrate_database(&mut connection).expect("migrate version ten database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let interval: String = connection
+            .query_row(
+                "SELECT value FROM app_metadata WHERE key = 'backup_automatic_interval_hours'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("normalized backup interval");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(interval, "24");
     }
 }
