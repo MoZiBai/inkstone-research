@@ -219,7 +219,73 @@ export interface DatabaseImportResult {
   safetyBackupPath: string
   missingPdfCount: number
   sourceProjectCount: number
+  sourceDocumentCount: number
+  sourceCardCount: number
+  sourceAnnotationCount: number
+  sourceOutlineNodeCount: number
+  sourceItemCount: number
   createdProjectCount: number
+  mergedProjectCount: number
+  addedItemCount: number
+  skippedItemCount: number
+  conflictItemCount: number
+  backupWarning: string | null
+  cleanupDeletedCount: number
+  cleanupFreedBytes: number
+}
+
+export interface DatabaseImportPreview {
+  sourceProjectCount: number
+  sourceDocumentCount: number
+  sourceCardCount: number
+  sourceAnnotationCount: number
+  sourceOutlineNodeCount: number
+  sourceItemCount: number
+  createdProjectCount: number
+  mergedProjectCount: number
+  addedItemCount: number
+  skippedItemCount: number
+  conflictItemCount: number
+  missingPdfCount: number
+}
+
+export type BackupKind = 'auto' | 'full' | 'project'
+
+export interface BackupRecord {
+  id: string
+  path: string
+  kind: BackupKind
+  projectId: string | null
+  sizeBytes: number
+  createdAt: string
+  isAvailable: boolean
+}
+
+export interface BackupSettings {
+  defaultDirectory: string
+  customDirectory: string | null
+  effectiveDirectory: string
+  retentionDays: number | null
+  directoryWarning: string | null
+  lastCleanupAt: string | null
+  lastCleanupResult: string | null
+}
+
+export interface BackupManagerState {
+  settings: BackupSettings
+  records: BackupRecord[]
+  totalSizeBytes: number
+}
+
+export interface BackupCleanupResult {
+  deletedCount: number
+  freedBytes: number
+  failedCount: number
+}
+
+export interface UpdateBackupSettingsInput {
+  customDirectory: string | null
+  retentionDays: number | null
 }
 
 export interface CreateCardFromSelectionInput {
@@ -341,6 +407,13 @@ export interface InkstoneApi {
   exportDatabase: (destinationPath: string) => Promise<string>
   importDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   importProjectDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
+  previewDatabaseImport: (sourcePath: string, projectOnly: boolean) => Promise<DatabaseImportPreview>
+  getBackupManager: () => Promise<BackupManagerState>
+  updateBackupSettings: (input: UpdateBackupSettingsInput) => Promise<BackupManagerState>
+  cleanupBackups: () => Promise<BackupCleanupResult>
+  deleteAutomaticBackup: (backupId: string) => Promise<void>
+  revealBackup: (backupId: string) => Promise<void>
+  revealBackupDirectory: () => Promise<void>
   readPdf: (documentId: string) => Promise<ArrayBuffer>
   revealPdfInFileManager: (documentId: string) => Promise<void>
   createCardFromSelection: (input: CreateCardFromSelectionInput) => Promise<string>

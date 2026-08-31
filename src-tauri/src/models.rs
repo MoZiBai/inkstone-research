@@ -283,7 +283,91 @@ pub struct DatabaseImportResult {
     pub safety_backup_path: String,
     pub missing_pdf_count: i64,
     pub source_project_count: i64,
+    pub source_document_count: i64,
+    pub source_card_count: i64,
+    pub source_annotation_count: i64,
+    pub source_outline_node_count: i64,
+    pub source_item_count: i64,
     pub created_project_count: i64,
+    pub merged_project_count: i64,
+    pub added_item_count: i64,
+    pub skipped_item_count: i64,
+    pub conflict_item_count: i64,
+    pub backup_warning: Option<String>,
+    pub cleanup_deleted_count: i64,
+    pub cleanup_freed_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseImportPreview {
+    pub source_project_count: i64,
+    pub source_document_count: i64,
+    pub source_card_count: i64,
+    pub source_annotation_count: i64,
+    pub source_outline_node_count: i64,
+    pub source_item_count: i64,
+    pub created_project_count: i64,
+    pub merged_project_count: i64,
+    pub added_item_count: i64,
+    pub skipped_item_count: i64,
+    pub conflict_item_count: i64,
+    pub missing_pdf_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRecord {
+    pub id: String,
+    pub path: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub size_bytes: i64,
+    pub created_at: String,
+    pub is_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSettings {
+    pub default_directory: String,
+    pub custom_directory: Option<String>,
+    pub effective_directory: String,
+    pub retention_days: Option<i64>,
+    pub directory_warning: Option<String>,
+    pub last_cleanup_at: Option<String>,
+    pub last_cleanup_result: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupPreferences {
+    pub custom_directory: Option<String>,
+    pub retention_days: Option<i64>,
+    pub last_cleanup_at: Option<String>,
+    pub last_cleanup_result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupManagerState {
+    pub settings: BackupSettings,
+    pub records: Vec<BackupRecord>,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCleanupResult {
+    pub deleted_count: i64,
+    pub freed_bytes: i64,
+    pub failed_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBackupSettingsInput {
+    pub custom_directory: Option<String>,
+    pub retention_days: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

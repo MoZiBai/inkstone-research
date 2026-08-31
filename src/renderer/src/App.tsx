@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   BookOpen,
   Boxes,
   ChevronDown,
@@ -6,13 +7,16 @@ import {
   DatabaseBackup,
   Download,
   FileStack,
+  FolderOpen,
   FolderKanban,
+  HardDrive,
   Library,
   LoaderCircle,
   PanelLeftClose,
   PanelLeftOpen,
   PencilLine,
   Plus,
+  RefreshCw,
   ScrollText,
   Settings2,
   ShieldCheck,
@@ -22,7 +26,14 @@ import {
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { DatabaseImportResult, ProjectSummary, WorkspaceSnapshot } from '@shared/types'
+import type {
+  BackupManagerState,
+  BackupRecord,
+  DatabaseImportPreview,
+  DatabaseImportResult,
+  ProjectSummary,
+  WorkspaceSnapshot
+} from '@shared/types'
 import { ConfirmDialog, Modal } from './components/Modal'
 import { LibraryView } from './features/library/LibraryView'
 import { OutlineView } from './features/outline/OutlineView'
@@ -59,9 +70,14 @@ export default function App(): React.JSX.Element {
   const [removingProject, setRemovingProject] = useState<ProjectSummary | null>(null)
   const [showDatabaseDialog, setShowDatabaseDialog] = useState(false)
   const [databaseBusy, setDatabaseBusy] = useState(false)
+  const [backupManager, setBackupManager] = useState<BackupManagerState | null>(null)
+  const [backupManagerError, setBackupManagerError] = useState<string | null>(null)
+  const [backupManagerBusy, setBackupManagerBusy] = useState(false)
+  const [deletingBackup, setDeletingBackup] = useState<BackupRecord | null>(null)
   const [pendingDatabaseImport, setPendingDatabaseImport] = useState<{
     path: string
     mode: 'database' | 'project'
+    preview: DatabaseImportPreview
   } | null>(null)
   const [databaseImportResult, setDatabaseImportResult] = useState<DatabaseImportResult | null>(null)
   const [focusCardId, setFocusCardId] = useState<string | null>(null)
@@ -85,6 +101,18 @@ export default function App(): React.JSX.Element {
       setFatalError(normalizeError(error))
     } finally {
       setInitialLoading(false)
+    }
+  }, [])
+
+  const loadBackupManager = useCallback(async (): Promise<void> => {
+    setBackupManagerBusy(true)
+    try {
+      setBackupManager(await api.getBackupManager())
+      setBackupManagerError(null)
+    } catch (error) {
+      setBackupManagerError(normalizeError(error))
+    } finally {
+      setBackupManagerBusy(false)
     }
   }, [])
 
@@ -155,6 +183,7 @@ export default function App(): React.JSX.Element {
       if (typeof destination !== 'string') return
       setDatabaseBusy(true)
       await api.exportDatabase(destination)
+      await loadBackupManager()
       notify('完整数据库备份已导出。')
     } catch (error) {
       notify(normalizeError(error))
@@ -174,6 +203,7 @@ export default function App(): React.JSX.Element {
       if (typeof destination !== 'string') return
       setDatabaseBusy(true)
       await api.exportProjectDatabase(currentProject.id, destination)
+      await loadBackupManager()
       notify('当前项目数据库已导出；PDF 文件未打包。')
     } catch (error) {
       notify(normalizeError(error))
@@ -211,9 +241,14 @@ export default function App(): React.JSX.Element {
         directory: false,
         filters: [{ name: mode === 'project' ? '砚台项目数据库' : '砚台数据库备份', extensions: ['db'] }]
       })
-      if (typeof source === 'string') setPendingDatabaseImport({ path: source, mode })
+      if (typeof source !== 'string') return
+      setDatabaseBusy(true)
+      const preview = await api.previewDatabaseImport(source, mode === 'project')
+      setPendingDatabaseImport({ path: source, mode, preview })
     } catch (error) {
       notify(normalizeError(error))
+    } finally {
+      setDatabaseBusy(false)
     }
   }
 
@@ -235,11 +270,82 @@ export default function App(): React.JSX.Element {
     )
     setDatabaseBusy(false)
     if (succeeded && resultHolder.value) {
+      await loadBackupManager()
       setDatabaseImportResult(resultHolder.value)
       setPendingDatabaseImport(null)
       setShowDatabaseDialog(false)
       setReadingRequest(null)
       setFocusCardId(null)
+    }
+  }
+
+  const chooseBackupDirectory = async (): Promise<void> => {
+    try {
+      const directory = await openDialog({
+        title: '选择自动安全备份目录',
+        multiple: false,
+        directory: true
+      })
+      if (typeof directory !== 'string') return
+      setBackupManagerBusy(true)
+      const next = await api.updateBackupSettings({
+        customDirectory: directory,
+        retentionDays: backupManager?.settings.retentionDays ?? null
+      })
+      setBackupManager(next)
+      setBackupManagerError(null)
+      notify('自动备份目录已更新；旧目录中的备份仍保留在原位置。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setBackupManagerBusy(false)
+    }
+  }
+
+  const updateBackupSettings = async (
+    customDirectory: string | null,
+    retentionDays: number | null
+  ): Promise<void> => {
+    setBackupManagerBusy(true)
+    try {
+      const next = await api.updateBackupSettings({ customDirectory, retentionDays })
+      setBackupManager(next)
+      setBackupManagerError(null)
+      notify('自动备份设置已保存。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setBackupManagerBusy(false)
+    }
+  }
+
+  const cleanupBackups = async (): Promise<void> => {
+    setBackupManagerBusy(true)
+    try {
+      const result = await api.cleanupBackups()
+      await loadBackupManager()
+      notify(`备份清理完成：删除 ${result.deletedCount} 份，释放 ${formatBytes(result.freedBytes)}${
+        result.failedCount > 0 ? `，${result.failedCount} 份未能处理` : ''
+      }。`)
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setBackupManagerBusy(false)
+    }
+  }
+
+  const deleteAutomaticBackup = async (): Promise<void> => {
+    if (!deletingBackup) return
+    setBackupManagerBusy(true)
+    try {
+      await api.deleteAutomaticBackup(deletingBackup.id)
+      setDeletingBackup(null)
+      await loadBackupManager()
+      notify('自动安全备份已删除；当前数据库未受影响。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setBackupManagerBusy(false)
     }
   }
 
@@ -427,7 +533,10 @@ export default function App(): React.JSX.Element {
             <button
               className="topbar-database-button"
               type="button"
-              onClick={() => setShowDatabaseDialog(true)}
+              onClick={() => {
+                setShowDatabaseDialog(true)
+                void loadBackupManager()
+              }}
             >
               <DatabaseBackup size={14} /> 备份与恢复
             </button>
@@ -565,34 +674,54 @@ export default function App(): React.JSX.Element {
       {showDatabaseDialog ? (
         <DatabaseTransferDialog
           busy={databaseBusy || mutating}
+          managerBusy={backupManagerBusy}
+          manager={backupManager}
+          managerError={backupManagerError}
           onExport={() => void exportDatabase()}
           onMerge={() => void chooseDatabaseImport('database')}
           onImportProject={() => void chooseDatabaseImport('project')}
+          onRefresh={() => void loadBackupManager()}
+          onChooseDirectory={() => void chooseBackupDirectory()}
+          onResetDirectory={() =>
+            void updateBackupSettings(null, backupManager?.settings.retentionDays ?? null)
+          }
+          onUpdateRetention={(retentionDays) =>
+            void updateBackupSettings(
+              backupManager?.settings.customDirectory ?? null,
+              retentionDays
+            )
+          }
+          onCleanup={() => void cleanupBackups()}
+          onRevealDirectory={() => void api.revealBackupDirectory().catch((error) => notify(normalizeError(error)))}
+          onRevealBackup={(backupId) =>
+            void api.revealBackup(backupId).catch((error) => notify(normalizeError(error)))
+          }
+          onDeleteBackup={setDeletingBackup}
           onClose={() => setShowDatabaseDialog(false)}
         />
       ) : null}
 
-      {pendingDatabaseImport ? (
+      {deletingBackup ? (
         <ConfirmDialog
-          title={
-            pendingDatabaseImport.mode === 'project'
-              ? '把这个项目加入当前资料库？'
-              : '把备份合并到当前资料库？'
-          }
-          description={
-            pendingDatabaseImport.mode === 'project'
-              ? `即将导入“${fileName(pendingDatabaseImport.path)}”。现有项目不会被删除或覆盖；同源数据会按稳定 ID 合并。项目数据库不包含 PDF，缺失文件可稍后重新链接。`
-              : `即将合并“${fileName(pendingDatabaseImport.path)}”。当前资料库会先自动备份，现有项目不会被删除或覆盖，备份中缺少的项目与研究数据会被补充进来。`
-          }
-          confirmLabel={
-            databaseBusy
-              ? pendingDatabaseImport.mode === 'project' ? '正在导入项目…' : '正在合并…'
-              : pendingDatabaseImport.mode === 'project' ? '确认导入项目' : '确认合并'
-          }
+          title="删除这份自动安全备份？"
+          description={`将永久删除“${fileName(deletingBackup.path)}”（${formatDateTime(deletingBackup.createdAt)}，${formatBytes(deletingBackup.sizeBytes)}）。这不会删除或修改当前正在使用的数据库。`}
+          confirmLabel={backupManagerBusy ? '正在删除…' : '删除备份文件'}
+          dangerous
           onConfirm={() => {
-            if (!databaseBusy) void importDatabase()
+            if (!backupManagerBusy) void deleteAutomaticBackup()
           }}
-          onCancel={() => setPendingDatabaseImport(null)}
+          onCancel={() => {
+            if (!backupManagerBusy) setDeletingBackup(null)
+          }}
+        />
+      ) : null}
+
+      {pendingDatabaseImport ? (
+        <DatabaseImportPreviewDialog
+          pending={pendingDatabaseImport}
+          busy={databaseBusy}
+          onConfirm={() => void importDatabase()}
+          onClose={() => setPendingDatabaseImport(null)}
         />
       ) : null}
 
@@ -614,19 +743,56 @@ export default function App(): React.JSX.Element {
 
 interface DatabaseTransferDialogProps {
   busy: boolean
+  managerBusy: boolean
+  manager: BackupManagerState | null
+  managerError: string | null
   onExport: () => void
   onMerge: () => void
   onImportProject: () => void
+  onRefresh: () => void
+  onChooseDirectory: () => void
+  onResetDirectory: () => void
+  onUpdateRetention: (retentionDays: number | null) => void
+  onCleanup: () => void
+  onRevealDirectory: () => void
+  onRevealBackup: (backupId: string) => void
+  onDeleteBackup: (backup: BackupRecord) => void
   onClose: () => void
 }
 
 function DatabaseTransferDialog({
   busy,
+  managerBusy,
+  manager,
+  managerError,
   onExport,
   onMerge,
   onImportProject,
+  onRefresh,
+  onChooseDirectory,
+  onResetDirectory,
+  onUpdateRetention,
+  onCleanup,
+  onRevealDirectory,
+  onRevealBackup,
+  onDeleteBackup,
   onClose
 }: DatabaseTransferDialogProps): React.JSX.Element {
+  const retentionDays = manager?.settings.retentionDays ?? null
+  const usesCustomRetention = retentionDays !== null && ![7, 30, 90, 180].includes(retentionDays)
+  const [showCustomRetention, setShowCustomRetention] = useState(usesCustomRetention)
+  const [customRetentionDraft, setCustomRetentionDraft] = useState(
+    usesCustomRetention ? String(retentionDays) : '30'
+  )
+
+  useEffect(() => {
+    setShowCustomRetention(usesCustomRetention)
+    if (usesCustomRetention && retentionDays !== null) {
+      setCustomRetentionDraft(String(retentionDays))
+    }
+  }, [retentionDays, usesCustomRetention])
+
+  const allBusy = busy || managerBusy
   return (
     <Modal
       title="数据库备份与导入"
@@ -635,21 +801,21 @@ function DatabaseTransferDialog({
       width="large"
     >
       <div className="database-transfer-options">
-        <button type="button" disabled={busy} onClick={onExport}>
+        <button type="button" disabled={allBusy} onClick={onExport}>
           <span className="database-transfer-icon"><Download size={20} /></span>
           <span>
             <strong>导出完整数据库</strong>
             <small>保存项目、卡片、标注、阅读笔记、二次整理和论文提纲。</small>
           </span>
         </button>
-        <button type="button" disabled={busy} onClick={onImportProject}>
+        <button type="button" disabled={allBusy} onClick={onImportProject}>
           <span className="database-transfer-icon"><Upload size={20} /></span>
           <span>
             <strong>导入单个项目</strong>
             <small>导入项目级数据库，保留当前资料库中的所有已有项目。</small>
           </span>
         </button>
-        <button className="database-merge-option" type="button" disabled={busy} onClick={onMerge}>
+        <button className="database-merge-option" type="button" disabled={allBusy} onClick={onMerge}>
           <span className="database-transfer-icon"><DatabaseBackup size={20} /></span>
           <span>
             <strong>合并完整数据库备份</strong>
@@ -659,8 +825,149 @@ function DatabaseTransferDialog({
       </div>
       <div className="database-transfer-note">
         <ShieldCheck size={16} />
-        <span>导出使用 SQLite 一致性快照；导入前会检查文件并自动保存当前数据库。</span>
+        <span>数据库备份保存卡片、批注、分类、提纲、文献元数据和 PDF 路径，但不会复制 PDF 原件。</span>
       </div>
+
+      <section className="backup-manager-section">
+        <header className="backup-manager-heading">
+          <div>
+            <h3>自动安全备份</h3>
+            <p>导入合并前先备份当前数据库；只有登记过的自动备份会参与清理。</p>
+          </div>
+          <button className="icon-button" type="button" disabled={managerBusy} onClick={onRefresh} aria-label="刷新备份列表">
+            <RefreshCw className={managerBusy ? 'spin' : undefined} size={16} />
+          </button>
+        </header>
+
+        {managerError ? (
+          <div className="backup-manager-warning"><AlertTriangle size={16} /><span>{managerError}</span></div>
+        ) : null}
+
+        {manager ? (
+          <>
+            <div className="backup-settings-grid">
+              <div className="backup-setting-card backup-directory-setting">
+                <span className="backup-setting-label">当前自动备份目录</span>
+                <code title={manager.settings.effectiveDirectory}>{manager.settings.effectiveDirectory}</code>
+                {manager.settings.directoryWarning ? (
+                  <p className="backup-manager-warning"><AlertTriangle size={14} /><span>{manager.settings.directoryWarning}</span></p>
+                ) : null}
+                <div className="backup-setting-actions">
+                  <button className="button ghost compact" type="button" disabled={allBusy} onClick={onRevealDirectory}>
+                    <FolderOpen size={14} /> 打开目录
+                  </button>
+                  <button className="button ghost compact" type="button" disabled={allBusy} onClick={onChooseDirectory}>
+                    更换目录
+                  </button>
+                  {manager.settings.customDirectory ? (
+                    <button className="button ghost compact" type="button" disabled={allBusy} onClick={onResetDirectory}>
+                      恢复默认
+                    </button>
+                  ) : null}
+                </div>
+                {manager.settings.customDirectory ? (
+                  <small>旧目录中的备份不会被移动或删除，仍会保留在下方记录中。</small>
+                ) : null}
+              </div>
+
+              <div className="backup-setting-card">
+                <label className="backup-retention-field">
+                  <span className="backup-setting-label">自动清理策略</span>
+                  <select
+                    value={showCustomRetention ? 'custom' : retentionDays === null ? 'never' : String(retentionDays)}
+                    disabled={allBusy}
+                    onChange={(event) => {
+                      if (event.target.value === 'custom') {
+                        setShowCustomRetention(true)
+                        return
+                      }
+                      setShowCustomRetention(false)
+                      onUpdateRetention(event.target.value === 'never' ? null : Number(event.target.value))
+                    }}
+                  >
+                    <option value="never">从不自动清理（默认）</option>
+                    <option value="7">保留最近 7 天</option>
+                    <option value="30">保留最近 30 天</option>
+                    <option value="90">保留最近 90 天</option>
+                    <option value="180">保留最近 180 天</option>
+                    <option value="custom">自定义天数</option>
+                  </select>
+                </label>
+                {showCustomRetention ? (
+                  <div className="backup-custom-retention">
+                    <input
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={customRetentionDraft}
+                      disabled={allBusy}
+                      aria-label="自定义自动备份保留天数"
+                      onChange={(event) => setCustomRetentionDraft(event.target.value)}
+                    />
+                    <span>天</span>
+                    <button
+                      className="button ghost compact"
+                      type="button"
+                      disabled={allBusy || !validRetentionDays(customRetentionDraft)}
+                      onClick={() => onUpdateRetention(Number(customRetentionDraft))}
+                    >
+                      保存
+                    </button>
+                  </div>
+                ) : null}
+                <small>启用清理时仍至少保留最近 3 份有效自动备份；手动导出永不自动清理。</small>
+                <button
+                  className="button ghost compact backup-cleanup-button"
+                  type="button"
+                  disabled={allBusy || retentionDays === null}
+                  onClick={onCleanup}
+                >
+                  <RefreshCw size={14} /> 立即按当前策略清理
+                </button>
+                {manager.settings.lastCleanupAt ? (
+                  <small title={manager.settings.lastCleanupResult ?? undefined}>
+                    最近清理：{formatDateTime(manager.settings.lastCleanupAt)} · {manager.settings.lastCleanupResult ?? '已完成'}
+                  </small>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="backup-records-heading">
+              <div>
+                <h4>应用登记的备份</h4>
+                <span>{manager.records.length} 份 · 当前可用文件共 {formatBytes(manager.totalSizeBytes)}</span>
+              </div>
+            </div>
+            <div className="backup-records-list">
+              {manager.records.length === 0 ? (
+                <div className="backup-empty"><HardDrive size={20} /><span>尚无应用登记的数据库备份。</span></div>
+              ) : manager.records.map((record) => (
+                <article className={`backup-record ${record.isAvailable ? '' : 'unavailable'}`} key={record.id}>
+                  <span className={`backup-kind backup-kind-${record.kind}`}>{backupKindLabel(record.kind)}</span>
+                  <div className="backup-record-copy">
+                    <strong title={record.path}>{fileName(record.path)}</strong>
+                    <small>{formatDateTime(record.createdAt)} · {formatBytes(record.sizeBytes)}</small>
+                    <code title={record.path}>{record.path}</code>
+                    {!record.isAvailable ? <em>文件已不在登记位置</em> : null}
+                  </div>
+                  <div className="backup-record-actions">
+                    <button className="button ghost compact" type="button" disabled={!record.isAvailable || allBusy} onClick={() => onRevealBackup(record.id)}>
+                      <FolderOpen size={13} /> 定位
+                    </button>
+                    {record.kind === 'auto' ? (
+                      <button className="button danger compact" type="button" disabled={allBusy} onClick={() => onDeleteBackup(record)}>
+                        <Trash2 size={13} /> 删除
+                      </button>
+                    ) : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </>
+        ) : managerBusy ? (
+          <div className="backup-empty"><LoaderCircle className="spin" size={18} /><span>正在读取备份记录…</span></div>
+        ) : null}
+      </section>
     </Modal>
   )
 }
@@ -673,34 +980,116 @@ function DatabaseImportResultDialog({
   onClose: () => void
 }): React.JSX.Element {
   return (
-    <Modal title="数据库合并完成" onClose={onClose} width="medium">
+    <Modal title="数据库合并完成" onClose={onClose} width="large">
       <div className="database-import-result">
         <ShieldCheck size={28} />
         <p>现有项目保持不变；文件中的项目、卡片、标注、二次整理和提纲已安全合并。</p>
-        <dl>
-          <div>
-            <dt>文件中项目</dt>
-            <dd>{result.sourceProjectCount} 个</dd>
-          </div>
-          <div>
-            <dt>新增项目</dt>
-            <dd>{result.createdProjectCount} 个</dd>
-          </div>
-          <div>
-            <dt>缺失 PDF</dt>
-            <dd>{result.missingPdfCount} 篇</dd>
-          </div>
+        <div className="database-preview-summary database-result-summary">
+          <section>
+            <h3>来源内容</h3>
+            <dl>
+              <div><dt>项目</dt><dd>{result.sourceProjectCount}</dd></div>
+              <div><dt>文献</dt><dd>{result.sourceDocumentCount}</dd></div>
+              <div><dt>卡片</dt><dd>{result.sourceCardCount}</dd></div>
+              <div><dt>PDF 批注</dt><dd>{result.sourceAnnotationCount}</dd></div>
+              <div><dt>提纲节点</dt><dd>{result.sourceOutlineNodeCount}</dd></div>
+            </dl>
+          </section>
+          <section>
+            <h3>合并结果</h3>
+            <dl>
+              <div className="positive"><dt>新增记录</dt><dd>{result.addedItemCount}</dd></div>
+              <div><dt>新增项目</dt><dd>{result.createdProjectCount}</dd></div>
+              <div><dt>合并已有项目</dt><dd>{result.mergedProjectCount}</dd></div>
+              <div><dt>跳过相同记录</dt><dd>{result.skippedItemCount}</dd></div>
+              <div className={result.conflictItemCount > 0 ? 'warning' : ''}><dt>保留当前版本的冲突</dt><dd>{result.conflictItemCount}</dd></div>
+              <div className={result.missingPdfCount > 0 ? 'warning' : ''}><dt>缺失 PDF</dt><dd>{result.missingPdfCount}</dd></div>
+            </dl>
+          </section>
+        </div>
+        <dl className="database-result-details">
           <div>
             <dt>合并前自动备份</dt>
             <dd title={result.safetyBackupPath}>{result.safetyBackupPath}</dd>
           </div>
         </dl>
+        {result.backupWarning ? (
+          <p className="database-import-warning">{result.backupWarning}</p>
+        ) : null}
+        {result.cleanupDeletedCount > 0 ? (
+          <p className="database-cleanup-result">
+            自动清理删除 {result.cleanupDeletedCount} 份过期安全备份，释放 {formatBytes(result.cleanupFreedBytes)}。
+          </p>
+        ) : null}
         {result.missingPdfCount > 0 ? (
           <p className="database-import-warning">请在阅读台选择缺失文献，并使用“重新链接 PDF”。</p>
         ) : null}
       </div>
       <div className="modal-actions">
         <button className="button primary" type="button" onClick={onClose}>知道了</button>
+      </div>
+    </Modal>
+  )
+}
+
+function DatabaseImportPreviewDialog({
+  pending,
+  busy,
+  onConfirm,
+  onClose
+}: {
+  pending: { path: string; mode: 'database' | 'project'; preview: DatabaseImportPreview }
+  busy: boolean
+  onConfirm: () => void
+  onClose: () => void
+}): React.JSX.Element {
+  const { preview } = pending
+  const projectOnly = pending.mode === 'project'
+  return (
+    <Modal
+      title={projectOnly ? '导入项目预览' : '数据库合并预览'}
+      subtitle={`已检查“${fileName(pending.path)}”；确认前请核对来源内容和预计合并结果。`}
+      onClose={() => {
+        if (!busy) onClose()
+      }}
+      width="large"
+    >
+      <div className="database-preview-summary">
+        <section>
+          <h3>文件内容</h3>
+          <dl>
+            <div><dt>项目</dt><dd>{preview.sourceProjectCount}</dd></div>
+            <div><dt>文献</dt><dd>{preview.sourceDocumentCount}</dd></div>
+            <div><dt>卡片</dt><dd>{preview.sourceCardCount}</dd></div>
+            <div><dt>PDF 批注</dt><dd>{preview.sourceAnnotationCount}</dd></div>
+            <div><dt>提纲节点</dt><dd>{preview.sourceOutlineNodeCount}</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h3>预计合并结果</h3>
+          <dl>
+            <div className="positive"><dt>新增记录</dt><dd>{preview.addedItemCount}</dd></div>
+            <div><dt>合并到已有项目</dt><dd>{preview.mergedProjectCount}</dd></div>
+            <div><dt>跳过相同记录</dt><dd>{preview.skippedItemCount}</dd></div>
+            <div className={preview.conflictItemCount > 0 ? 'warning' : ''}><dt>内容冲突</dt><dd>{preview.conflictItemCount}</dd></div>
+            <div className={preview.missingPdfCount > 0 ? 'warning' : ''}><dt>缺失 PDF</dt><dd>{preview.missingPdfCount}</dd></div>
+          </dl>
+        </section>
+      </div>
+      <div className="database-preview-explanation">
+        <ShieldCheck size={17} />
+        <p>
+          “新增”是会补入的数据库记录；“跳过”是稳定标识与内容都相同的重复记录；“冲突”表示稳定标识相同但内容不同，本次会保留当前资料库中的版本。导入前必须先成功创建自动安全备份，现有项目不会被清空或替换。
+        </p>
+      </div>
+      {preview.missingPdfCount > 0 ? (
+        <p className="database-import-warning">数据库不包含 PDF 原件；导入后可在阅读台为缺失文献重新链接 PDF。</p>
+      ) : null}
+      <div className="modal-actions">
+        <button className="button ghost" type="button" disabled={busy} onClick={onClose}>取消</button>
+        <button className="button primary" type="button" disabled={busy} onClick={onConfirm}>
+          {busy ? '正在安全合并…' : projectOnly ? '确认导入项目' : '确认合并数据库'}
+        </button>
       </div>
     </Modal>
   )
@@ -819,4 +1208,36 @@ function allowsNativeContextMenu(target: EventTarget | null): boolean {
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path
+}
+
+function formatBytes(value: number): string {
+  const size = Math.max(0, value)
+  if (size < 1024) return `${size} B`
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`
+  if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(size < 10 * 1024 ** 2 ? 1 : 0)} MB`
+  return `${(size / 1024 ** 3).toFixed(2)} GB`
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date)
+}
+
+function backupKindLabel(kind: BackupRecord['kind']): string {
+  if (kind === 'auto') return '自动安全备份'
+  if (kind === 'project') return '单项目导出'
+  return '完整数据库导出'
+}
+
+function validRetentionDays(value: string): boolean {
+  if (!/^\d+$/.test(value)) return false
+  const days = Number(value)
+  return Number.isInteger(days) && days >= 1 && days <= 3650
 }

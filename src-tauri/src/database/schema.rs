@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -300,6 +300,26 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
               ON project_card_roles(project_card_id);
             CREATE INDEX IF NOT EXISTS idx_project_card_roles_role
               ON project_card_roles(research_role_id);
+            "#,
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+
+    if current_version < 8 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS backup_records (
+              id TEXT PRIMARY KEY,
+              path TEXT NOT NULL UNIQUE,
+              kind TEXT NOT NULL CHECK (kind IN ('auto', 'full', 'project')),
+              project_id TEXT,
+              managed_directory TEXT,
+              size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backup_records_kind_created
+              ON backup_records(kind, created_at DESC);
             "#,
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -604,5 +624,34 @@ mod tests {
         assert_eq!(migrated_name, "支持");
         assert_eq!(unset_links, 0);
         assert_eq!(origin_kind, "normal");
+    }
+
+    #[test]
+    fn version_seven_database_adds_backup_registry() {
+        let mut connection = Connection::open_in_memory().expect("memory database");
+        migrate_database(&mut connection).expect("create current schema");
+        connection
+            .execute_batch(
+                r#"
+                DROP TABLE backup_records;
+                PRAGMA user_version = 7;
+                "#,
+            )
+            .expect("version seven fixture");
+
+        migrate_database(&mut connection).expect("migrate version seven database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let table_exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'backup_records')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup registry table");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(table_exists, 1);
     }
 }

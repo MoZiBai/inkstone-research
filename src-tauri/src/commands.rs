@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
@@ -8,12 +11,14 @@ use uuid::Uuid;
 use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    BackupCleanupResult, BackupManagerState, BackupSettings, CreateCardFromSelectionInput,
+    CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput,
+    CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview,
     DatabaseImportResult, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
-    RemoveDocumentInput, UpdateCardInput, UpdateCategoryInput, UpdateDocumentInput,
-    UpdateOutlineCardLinkInput, UpdateOutlineNodeInput, UpdatePdfAnnotationInput,
-    UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput, WorkspaceSnapshot,
+    RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput, UpdateCategoryInput,
+    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
+    WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -47,6 +52,130 @@ impl AppState {
             .lock()
             .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))
     }
+}
+
+fn validated_writable_backup_directory(path: &Path) -> AppResult<PathBuf> {
+    if !path.is_dir() {
+        return Err(AppError::Validation("选择的备份目录不存在。".into()));
+    }
+    let canonical = path.canonicalize()?;
+    let probe = canonical.join(format!(".inkstone-write-test-{}", Uuid::new_v4()));
+    let result = (|| -> AppResult<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)?;
+        file.write_all(b"inkstone")?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&probe);
+    result?;
+    Ok(canonical)
+}
+
+struct ResolvedBackupDirectory {
+    directory: PathBuf,
+    warning: Option<String>,
+    retention_days: Option<i64>,
+    last_cleanup_at: Option<String>,
+    last_cleanup_result: Option<String>,
+}
+
+fn resolved_backup_directory(
+    repository: &Repository,
+    default_directory: &Path,
+) -> AppResult<ResolvedBackupDirectory> {
+    let preferences = repository.backup_preferences()?;
+    if let Some(custom) = preferences.custom_directory.as_deref() {
+        match validated_writable_backup_directory(Path::new(custom)) {
+            Ok(directory) => {
+                return Ok(ResolvedBackupDirectory {
+                    directory,
+                    warning: None,
+                    retention_days: preferences.retention_days,
+                    last_cleanup_at: preferences.last_cleanup_at,
+                    last_cleanup_result: preferences.last_cleanup_result,
+                });
+            }
+            Err(error) => {
+                let fallback = validated_writable_backup_directory(default_directory)?;
+                return Ok(ResolvedBackupDirectory {
+                    directory: fallback,
+                    warning: Some(format!(
+                        "自定义备份目录当前不可用，已回退到默认目录：{error}"
+                    )),
+                    retention_days: preferences.retention_days,
+                    last_cleanup_at: preferences.last_cleanup_at,
+                    last_cleanup_result: preferences.last_cleanup_result,
+                });
+            }
+        }
+    }
+    Ok(ResolvedBackupDirectory {
+        directory: validated_writable_backup_directory(default_directory)?,
+        warning: None,
+        retention_days: preferences.retention_days,
+        last_cleanup_at: preferences.last_cleanup_at,
+        last_cleanup_result: preferences.last_cleanup_result,
+    })
+}
+
+fn backup_manager_state(
+    repository: &Repository,
+    default_directory: &Path,
+) -> AppResult<BackupManagerState> {
+    let custom_directory = repository.backup_preferences()?.custom_directory;
+    let resolved = resolved_backup_directory(repository, default_directory)?;
+    let records = repository.backup_records()?;
+    let total_size_bytes = records
+        .iter()
+        .filter(|record| record.is_available)
+        .fold(0_i64, |total, record| {
+            total.saturating_add(record.size_bytes)
+        });
+    Ok(BackupManagerState {
+        settings: BackupSettings {
+            default_directory: default_directory.to_string_lossy().into_owned(),
+            custom_directory,
+            effective_directory: resolved.directory.to_string_lossy().into_owned(),
+            retention_days: resolved.retention_days,
+            directory_warning: resolved.warning,
+            last_cleanup_at: resolved.last_cleanup_at,
+            last_cleanup_result: resolved.last_cleanup_result,
+        },
+        records,
+        total_size_bytes,
+    })
+}
+
+fn reveal_path(path: &Path, select_file: bool) -> AppResult<()> {
+    let canonical = path.canonicalize()?;
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer.exe");
+        if select_file {
+            command.arg("/select,");
+        }
+        command.arg(&canonical).spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        if select_file {
+            command.arg("-R");
+        }
+        command.arg(&canonical).spawn()?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(if select_file {
+            canonical.parent().unwrap_or(&canonical)
+        } else {
+            canonical.as_path()
+        })
+        .spawn()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -163,10 +292,11 @@ pub async fn export_database(
     let repository = Arc::clone(&state.repository);
     let returned_path = destination.to_string_lossy().into_owned();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = repository.lock().map_err(|_| {
+        let mut guard = repository.lock().map_err(|_| {
             crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
         })?;
-        guard.export_database(&destination)
+        guard.export_database(&destination)?;
+        guard.record_backup(&destination, "full", None, None)
     })
     .await
     .map_err(|error| {
@@ -190,16 +320,53 @@ pub async fn export_project_database(
     let repository = Arc::clone(&state.repository);
     let returned_path = destination.to_string_lossy().into_owned();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = repository.lock().map_err(|_| {
+        let mut guard = repository.lock().map_err(|_| {
             crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
         })?;
-        guard.export_project_database(&project_id, &destination)
+        guard.export_project_database(&project_id, &destination)?;
+        guard.record_backup(&destination, "project", Some(&project_id), None)
     })
     .await
     .map_err(|error| {
         crate::error::AppError::Validation(format!("项目数据库导出任务失败：{error}"))
     })??;
     Ok(returned_path)
+}
+
+#[tauri::command]
+pub async fn preview_database_import(
+    source_path: String,
+    project_only: bool,
+    state: State<'_, AppState>,
+) -> AppResult<DatabaseImportPreview> {
+    let source = PathBuf::from(source_path);
+    if paths_refer_to_same_file(&source, &state.database_path) {
+        return Err(crate::error::AppError::Validation(
+            "不能把应用正在使用的数据库作为导入文件。".into(),
+        ));
+    }
+    let repository = Arc::clone(&state.repository);
+    let working_directory = state.backup_directory.clone();
+    let pdf_library_directory = state.pdf_library_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        let (mut preview, paths) =
+            guard.preview_database_import(&source, &working_directory, project_only)?;
+        preview.missing_pdf_count = paths
+            .iter()
+            .filter(|path| {
+                path.as_deref()
+                    .is_none_or(|path| !managed_pdf_is_available(path, &pdf_library_directory))
+            })
+            .count() as i64;
+        Ok::<DatabaseImportPreview, crate::error::AppError>(preview)
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("数据库导入预览任务失败：{error}"))
+    })?
 }
 
 #[tauri::command]
@@ -213,7 +380,16 @@ pub async fn import_database(
             "不能把应用正在使用的数据库作为导入文件。".into(),
         ));
     }
-    let safety_backup = state.backup_directory.join(format!(
+    let (backup_directory, backup_warning, retention_days) = {
+        let guard = state.lock()?;
+        let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
+        (
+            resolved.directory,
+            resolved.warning,
+            resolved.retention_days,
+        )
+    };
+    let safety_backup = backup_directory.join(format!(
         "inkstone-before-import-{}-{}.db",
         Utc::now().format("%Y%m%d-%H%M%S"),
         &Uuid::new_v4().to_string()[..8]
@@ -221,33 +397,46 @@ pub async fn import_database(
     let repository = Arc::clone(&state.repository);
     let pdf_library_directory = state.pdf_library_directory.clone();
     let returned_safety_path = safety_backup.to_string_lossy().into_owned();
-    let (source_project_count, created_project_count, missing_pdf_count) =
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut guard = repository.lock().map_err(|_| {
-                crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
-            })?;
-            let (source_project_count, created_project_count) =
-                guard.import_database(&source, &safety_backup)?;
-            let paths = guard.document_pdf_paths()?;
-            let missing_pdf_count = paths
-                .iter()
-                .filter(|path| !managed_pdf_is_available(path, &pdf_library_directory))
-                .count() as i64;
-            Ok::<(i64, i64, i64), crate::error::AppError>((
-                source_project_count,
-                created_project_count,
-                missing_pdf_count,
-            ))
-        })
-        .await
-        .map_err(|error| {
-            crate::error::AppError::Validation(format!("数据库导入任务失败：{error}"))
-        })??;
+    let (preview, cleanup) = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        let (mut preview, paths) =
+            guard.preview_database_import(&source, &backup_directory, false)?;
+        preview.missing_pdf_count = paths
+            .iter()
+            .filter(|path| {
+                path.as_deref()
+                    .is_none_or(|path| !managed_pdf_is_available(path, &pdf_library_directory))
+            })
+            .count() as i64;
+        guard.import_database(&source, &safety_backup)?;
+        let cleanup = guard.cleanup_automatic_backups(&backup_directory, retention_days)?;
+        Ok::<(DatabaseImportPreview, BackupCleanupResult), crate::error::AppError>((
+            preview, cleanup,
+        ))
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("数据库导入任务失败：{error}"))
+    })??;
     Ok(DatabaseImportResult {
         safety_backup_path: returned_safety_path,
-        missing_pdf_count,
-        source_project_count,
-        created_project_count,
+        missing_pdf_count: preview.missing_pdf_count,
+        source_project_count: preview.source_project_count,
+        source_document_count: preview.source_document_count,
+        source_card_count: preview.source_card_count,
+        source_annotation_count: preview.source_annotation_count,
+        source_outline_node_count: preview.source_outline_node_count,
+        source_item_count: preview.source_item_count,
+        created_project_count: preview.created_project_count,
+        merged_project_count: preview.merged_project_count,
+        added_item_count: preview.added_item_count,
+        skipped_item_count: preview.skipped_item_count,
+        conflict_item_count: preview.conflict_item_count,
+        backup_warning,
+        cleanup_deleted_count: cleanup.deleted_count,
+        cleanup_freed_bytes: cleanup.freed_bytes,
     })
 }
 
@@ -262,7 +451,16 @@ pub async fn import_project_database(
             "不能把应用正在使用的数据库作为项目导入文件。".into(),
         ));
     }
-    let safety_backup = state.backup_directory.join(format!(
+    let (backup_directory, backup_warning, retention_days) = {
+        let guard = state.lock()?;
+        let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
+        (
+            resolved.directory,
+            resolved.warning,
+            resolved.retention_days,
+        )
+    };
+    let safety_backup = backup_directory.join(format!(
         "inkstone-before-project-import-{}-{}.db",
         Utc::now().format("%Y%m%d-%H%M%S"),
         &Uuid::new_v4().to_string()[..8]
@@ -270,34 +468,94 @@ pub async fn import_project_database(
     let repository = Arc::clone(&state.repository);
     let pdf_library_directory = state.pdf_library_directory.clone();
     let returned_safety_path = safety_backup.to_string_lossy().into_owned();
-    let (source_project_count, created_project_count, missing_pdf_count) =
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut guard = repository.lock().map_err(|_| {
-                crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
-            })?;
-            let (source_project_count, created_project_count) =
-                guard.import_project_database(&source, &safety_backup)?;
-            let paths = guard.document_pdf_paths()?;
-            let missing_pdf_count = paths
-                .iter()
-                .filter(|path| !managed_pdf_is_available(path, &pdf_library_directory))
-                .count() as i64;
-            Ok::<(i64, i64, i64), crate::error::AppError>((
-                source_project_count,
-                created_project_count,
-                missing_pdf_count,
-            ))
-        })
-        .await
-        .map_err(|error| {
-            crate::error::AppError::Validation(format!("项目数据库导入任务失败：{error}"))
-        })??;
+    let (preview, cleanup) = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        let (mut preview, paths) =
+            guard.preview_database_import(&source, &backup_directory, true)?;
+        preview.missing_pdf_count = paths
+            .iter()
+            .filter(|path| {
+                path.as_deref()
+                    .is_none_or(|path| !managed_pdf_is_available(path, &pdf_library_directory))
+            })
+            .count() as i64;
+        guard.import_project_database(&source, &safety_backup)?;
+        let cleanup = guard.cleanup_automatic_backups(&backup_directory, retention_days)?;
+        Ok::<(DatabaseImportPreview, BackupCleanupResult), crate::error::AppError>((
+            preview, cleanup,
+        ))
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("项目数据库导入任务失败：{error}"))
+    })??;
     Ok(DatabaseImportResult {
         safety_backup_path: returned_safety_path,
-        missing_pdf_count,
-        source_project_count,
-        created_project_count,
+        missing_pdf_count: preview.missing_pdf_count,
+        source_project_count: preview.source_project_count,
+        source_document_count: preview.source_document_count,
+        source_card_count: preview.source_card_count,
+        source_annotation_count: preview.source_annotation_count,
+        source_outline_node_count: preview.source_outline_node_count,
+        source_item_count: preview.source_item_count,
+        created_project_count: preview.created_project_count,
+        merged_project_count: preview.merged_project_count,
+        added_item_count: preview.added_item_count,
+        skipped_item_count: preview.skipped_item_count,
+        conflict_item_count: preview.conflict_item_count,
+        backup_warning,
+        cleanup_deleted_count: cleanup.deleted_count,
+        cleanup_freed_bytes: cleanup.freed_bytes,
     })
+}
+
+#[tauri::command]
+pub fn get_backup_manager(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
+    let guard = state.lock()?;
+    backup_manager_state(&guard, &state.backup_directory)
+}
+
+#[tauri::command]
+pub fn update_backup_settings(
+    input: UpdateBackupSettingsInput,
+    state: State<'_, AppState>,
+) -> AppResult<BackupManagerState> {
+    let custom_directory = input
+        .custom_directory
+        .as_deref()
+        .map(PathBuf::from)
+        .map(|path| validated_writable_backup_directory(&path))
+        .transpose()?;
+    let mut guard = state.lock()?;
+    guard.set_backup_preferences(custom_directory.as_deref(), input.retention_days)?;
+    backup_manager_state(&guard, &state.backup_directory)
+}
+
+#[tauri::command]
+pub fn cleanup_backups(state: State<'_, AppState>) -> AppResult<BackupCleanupResult> {
+    let mut guard = state.lock()?;
+    let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
+    guard.cleanup_automatic_backups(&resolved.directory, resolved.retention_days)
+}
+
+#[tauri::command]
+pub fn delete_automatic_backup(backup_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state.lock()?.delete_automatic_backup(&backup_id)
+}
+
+#[tauri::command]
+pub fn reveal_backup(backup_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let path = state.lock()?.backup_record_path(&backup_id)?;
+    reveal_path(&path, true)
+}
+
+#[tauri::command]
+pub fn reveal_backup_directory(state: State<'_, AppState>) -> AppResult<()> {
+    let guard = state.lock()?;
+    let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
+    reveal_path(&resolved.directory, false)
 }
 
 fn paths_refer_to_same_file(first: &std::path::Path, second: &std::path::Path) -> bool {

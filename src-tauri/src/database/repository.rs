@@ -3,15 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rusqlite::backup::Backup;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    BackupCleanupResult, BackupPreferences, BackupRecord, CreateCardFromSelectionInput,
+    CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput,
+    CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview,
     DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink,
     OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
     RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
@@ -970,6 +971,11 @@ impl Repository {
                     "#,
                     [],
                 )?;
+                transaction.execute("DELETE FROM backup_records", [])?;
+                transaction.execute(
+                    "DELETE FROM app_metadata WHERE key LIKE 'backup\\_%' ESCAPE '\\'",
+                    [],
+                )?;
                 transaction.commit()?;
                 ensure_foreign_keys_are_valid(&exported)?;
                 exported.execute_batch(
@@ -986,12 +992,375 @@ impl Repository {
         result
     }
 
+    pub fn backup_preferences(&self) -> AppResult<BackupPreferences> {
+        let custom_directory = metadata_value(&self.connection, "backup_custom_directory")?
+            .filter(|value| !value.trim().is_empty());
+        let retention_days = metadata_value(&self.connection, "backup_retention_days")?
+            .map(|value| {
+                value.parse::<i64>().map_err(|_| {
+                    AppError::Validation("自动备份保留天数设置损坏，请重新设置。".into())
+                })
+            })
+            .transpose()?;
+        let last_cleanup_at = metadata_value(&self.connection, "backup_last_cleanup_at")?;
+        let last_cleanup_result = metadata_value(&self.connection, "backup_last_cleanup_result")?;
+        Ok(BackupPreferences {
+            custom_directory,
+            retention_days,
+            last_cleanup_at,
+            last_cleanup_result,
+        })
+    }
+
+    pub fn set_backup_preferences(
+        &mut self,
+        custom_directory: Option<&Path>,
+        retention_days: Option<i64>,
+    ) -> AppResult<()> {
+        if retention_days.is_some_and(|days| !(1..=3650).contains(&days)) {
+            return Err(AppError::Validation(
+                "自动备份保留天数必须在 1 到 3650 天之间。".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        set_or_remove_metadata(
+            &transaction,
+            "backup_custom_directory",
+            custom_directory.map(|path| path.to_string_lossy().into_owned()),
+        )?;
+        set_or_remove_metadata(
+            &transaction,
+            "backup_retention_days",
+            retention_days.map(|days| days.to_string()),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_backup(
+        &mut self,
+        path: &Path,
+        kind: &str,
+        project_id: Option<&str>,
+        managed_directory: Option<&Path>,
+    ) -> AppResult<()> {
+        if !["auto", "full", "project"].contains(&kind) {
+            return Err(AppError::Validation("备份类型无效。".into()));
+        }
+        if kind == "auto" && managed_directory.is_none() {
+            return Err(AppError::Validation(
+                "自动安全备份缺少受管理的备份目录。".into(),
+            ));
+        }
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(AppError::Validation("备份记录指向的不是文件。".into()));
+        }
+        let size_bytes = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        self.connection.execute(
+            r#"
+            INSERT INTO backup_records
+              (id, path, kind, project_id, managed_directory, size_bytes, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(path) DO UPDATE SET
+              kind = excluded.kind,
+              project_id = excluded.project_id,
+              managed_directory = excluded.managed_directory,
+              size_bytes = excluded.size_bytes,
+              created_at = excluded.created_at
+            "#,
+            params![
+                Uuid::new_v4().to_string(),
+                path.to_string_lossy(),
+                kind,
+                project_id,
+                managed_directory.map(|directory| directory.to_string_lossy().into_owned()),
+                size_bytes,
+                timestamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn backup_records(&self) -> AppResult<Vec<BackupRecord>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, path, kind, project_id, size_bytes, created_at
+            FROM backup_records
+            ORDER BY created_at DESC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            let path: String = row.get(1)?;
+            let current_size = fs::metadata(&path)
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .and_then(|metadata| i64::try_from(metadata.len()).ok());
+            Ok(BackupRecord {
+                id: row.get(0)?,
+                path,
+                kind: row.get(2)?,
+                project_id: row.get(3)?,
+                size_bytes: current_size.unwrap_or_else(|| row.get(4).unwrap_or(0)),
+                created_at: row.get(5)?,
+                is_available: current_size.is_some(),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn backup_record_path(&self, backup_id: &str) -> AppResult<PathBuf> {
+        let path = self
+            .connection
+            .query_row(
+                "SELECT path FROM backup_records WHERE id = ?1",
+                params![backup_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("备份记录".into()))?;
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(AppError::Validation("备份文件已经不在原位置。".into()));
+        }
+        Ok(path)
+    }
+
+    pub fn delete_automatic_backup(&mut self, backup_id: &str) -> AppResult<()> {
+        let record = self
+            .connection
+            .query_row(
+                "SELECT path, kind, managed_directory FROM backup_records WHERE id = ?1",
+                params![backup_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("备份记录".into()))?;
+        if record.1 != "auto" {
+            return Err(AppError::Validation(
+                "只能在此处删除砚台自动创建的安全备份。".into(),
+            ));
+        }
+        let path = PathBuf::from(&record.0);
+        if path.exists() {
+            let managed_directory = record
+                .2
+                .as_deref()
+                .ok_or_else(|| AppError::Validation("自动备份记录缺少管理目录。".into()))?;
+            let validated =
+                validated_automatic_backup_path(&path, Path::new(managed_directory), None)?;
+            fs::remove_file(validated)?;
+        }
+        self.connection.execute(
+            "DELETE FROM backup_records WHERE id = ?1",
+            params![backup_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn cleanup_automatic_backups(
+        &mut self,
+        directory: &Path,
+        retention_days: Option<i64>,
+    ) -> AppResult<BackupCleanupResult> {
+        let Some(retention_days) = retention_days else {
+            return Ok(BackupCleanupResult::default());
+        };
+        if !(1..=3650).contains(&retention_days) {
+            return Err(AppError::Validation(
+                "自动备份保留天数必须在 1 到 3650 天之间。".into(),
+            ));
+        }
+        let records = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT id, path, managed_directory, size_bytes, created_at
+                FROM backup_records
+                WHERE kind = 'auto'
+                ORDER BY created_at DESC
+                "#,
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let cutoff = Utc::now() - ChronoDuration::days(retention_days);
+        let canonical_directory = directory.canonicalize()?;
+        let mut valid_index = 0_usize;
+        let mut result = BackupCleanupResult::default();
+        let mut failure_reasons = Vec::new();
+        for (id, path_value, managed_directory, stored_size, created_at) in records {
+            let path = PathBuf::from(path_value);
+            if !path.is_file() {
+                continue;
+            }
+            let Some(managed_directory) = managed_directory else {
+                result.failed_count += 1;
+                if failure_reasons.len() < 3 {
+                    failure_reasons.push(format!(
+                        "{}：登记信息缺少受管理目录",
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("未知文件")
+                    ));
+                }
+                continue;
+            };
+            let registered_directory = match Path::new(&managed_directory).canonicalize() {
+                Ok(directory) => directory,
+                Err(error) => {
+                    result.failed_count += 1;
+                    if failure_reasons.len() < 3 {
+                        failure_reasons.push(format!("{managed_directory}：{error}"));
+                    }
+                    continue;
+                }
+            };
+            if registered_directory != canonical_directory {
+                continue;
+            }
+            let validated = match validated_automatic_backup_path(
+                &path,
+                &registered_directory,
+                Some(&canonical_directory),
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    result.failed_count += 1;
+                    if failure_reasons.len() < 3 {
+                        failure_reasons.push(format!(
+                            "{}：{error}",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("未知文件")
+                        ));
+                    }
+                    continue;
+                }
+            };
+            valid_index += 1;
+            if valid_index <= 3 {
+                continue;
+            }
+            let created = match DateTime::parse_from_rfc3339(&created_at) {
+                Ok(value) => value.with_timezone(&Utc),
+                Err(error) => {
+                    result.failed_count += 1;
+                    if failure_reasons.len() < 3 {
+                        failure_reasons.push(format!(
+                            "{}：创建时间无效（{error}）",
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("未知文件")
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if created >= cutoff {
+                continue;
+            }
+            let size = fs::metadata(&validated)
+                .ok()
+                .and_then(|metadata| i64::try_from(metadata.len()).ok())
+                .unwrap_or(stored_size);
+            match fs::remove_file(&validated) {
+                Ok(()) => {
+                    self.connection
+                        .execute("DELETE FROM backup_records WHERE id = ?1", params![id])?;
+                    result.deleted_count += 1;
+                    result.freed_bytes = result.freed_bytes.saturating_add(size.max(0));
+                }
+                Err(error) => {
+                    result.failed_count += 1;
+                    if failure_reasons.len() < 3 {
+                        failure_reasons.push(format!(
+                            "{}：{error}",
+                            validated
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("未知文件")
+                        ));
+                    }
+                }
+            }
+        }
+        let mut summary = format!(
+            "删除 {} 份，释放 {} 字节，失败 {} 份",
+            result.deleted_count, result.freed_bytes, result.failed_count
+        );
+        if !failure_reasons.is_empty() {
+            summary.push_str("；失败原因：");
+            summary.push_str(&failure_reasons.join("；"));
+            if result.failed_count as usize > failure_reasons.len() {
+                summary.push_str("；其余失败已省略");
+            }
+        }
+        let transaction = self.connection.transaction()?;
+        set_or_remove_metadata(&transaction, "backup_last_cleanup_at", Some(timestamp()))?;
+        set_or_remove_metadata(&transaction, "backup_last_cleanup_result", Some(summary))?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     pub fn import_database(
         &mut self,
         source: &Path,
         safety_backup: &Path,
     ) -> AppResult<(i64, i64)> {
         self.merge_database(source, safety_backup, false)
+    }
+
+    pub fn preview_database_import(
+        &self,
+        source: &Path,
+        working_directory: &Path,
+        require_single_project: bool,
+    ) -> AppResult<(DatabaseImportPreview, Vec<Option<PathBuf>>)> {
+        validate_database_file(source)?;
+        if !working_directory.is_dir() {
+            return Err(AppError::Validation(
+                "数据库导入预览的临时目录不可用。".into(),
+            ));
+        }
+        let prepared =
+            working_directory.join(format!(".inkstone-import-preview-{}.tmp", Uuid::new_v4()));
+        let result = (|| -> AppResult<(DatabaseImportPreview, Vec<Option<PathBuf>>)> {
+            fs::copy(source, &prepared)?;
+            let mut prepared_connection = Connection::open(&prepared)?;
+            migrate_database(&mut prepared_connection)?;
+            ensure_foreign_keys_are_valid(&prepared_connection)?;
+            let source_project_count: i64 =
+                prepared_connection
+                    .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
+            if source_project_count == 0 {
+                return Err(AppError::Validation("导入文件中没有研究项目。".into()));
+            }
+            if require_single_project && source_project_count != 1 {
+                return Err(AppError::Validation(format!(
+                    "项目导入文件应只包含 1 个项目，但当前文件包含 {source_project_count} 个。请改用“合并数据库备份”。"
+                )));
+            }
+            prepared_connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            drop(prepared_connection);
+            validate_database_file(&prepared)?;
+            inspect_import_database(&self.connection, &prepared)
+        })();
+        remove_sqlite_temporary_files(&prepared);
+        result
     }
 
     pub fn import_project_database(
@@ -1058,23 +1427,12 @@ impl Repository {
             .count() as i64;
 
         self.export_database(safety_backup)?;
+        self.record_backup(safety_backup, "auto", None, safety_backup.parent())?;
         let merge_result = merge_database_copy(&mut self.connection, &prepared);
         remove_sqlite_temporary_files(&prepared);
         merge_result?;
         ensure_foreign_keys_are_valid(&self.connection)?;
         Ok((source_project_ids.len() as i64, created_project_count))
-    }
-
-    pub fn document_pdf_paths(&self) -> AppResult<Vec<PathBuf>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT file_path FROM documents WHERE file_path IS NOT NULL")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect())
     }
 
     pub fn create_card_from_selection(
@@ -2027,6 +2385,231 @@ fn remove_sqlite_temporary_files(path: &Path) {
     }
 }
 
+fn metadata_value(connection: &Connection, key: &str) -> AppResult<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn set_or_remove_metadata(
+    transaction: &Transaction<'_>,
+    key: &str,
+    value: Option<String>,
+) -> AppResult<()> {
+    if let Some(value) = value {
+        transaction.execute(
+            r#"
+            INSERT INTO app_metadata (key, value) VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
+            params![key, value],
+        )?;
+    } else {
+        transaction.execute("DELETE FROM app_metadata WHERE key = ?1", params![key])?;
+    }
+    Ok(())
+}
+
+fn validated_automatic_backup_path(
+    path: &Path,
+    managed_directory: &Path,
+    expected_directory: Option<&Path>,
+) -> AppResult<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::Validation("自动备份文件名无效。".into()))?;
+    let valid_name = file_name.starts_with("inkstone-before-")
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("db"));
+    if !valid_name {
+        return Err(AppError::Validation(
+            "拒绝处理不符合砚台自动备份命名规则的文件。".into(),
+        ));
+    }
+    let canonical_directory = managed_directory.canonicalize()?;
+    if let Some(expected_directory) = expected_directory {
+        let canonical_expected = expected_directory.canonicalize()?;
+        if canonical_directory != canonical_expected {
+            return Err(AppError::Validation(
+                "自动备份不在当前设置的备份目录中。".into(),
+            ));
+        }
+    }
+    let canonical_path = path.canonicalize()?;
+    if canonical_path.parent() != Some(canonical_directory.as_path()) || !canonical_path.is_file() {
+        return Err(AppError::Validation(
+            "自动备份文件不在登记的受管理目录中。".into(),
+        ));
+    }
+    Ok(canonical_path)
+}
+
+struct ImportTableSpec {
+    table: &'static str,
+    identity: &'static str,
+    columns: &'static [&'static str],
+}
+
+const IMPORT_TABLES: &[ImportTableSpec] = &[
+    ImportTableSpec {
+        table: "projects",
+        identity: "d.id IS s.id",
+        columns: &["id", "name", "description", "color", "sort_order", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "documents",
+        identity: "d.id IS s.id",
+        columns: &["id", "title", "authors", "year", "file_path", "file_hash", "created_at", "updated_at", "journal", "volume", "issue", "pages", "doi", "publisher", "metadata_raw"],
+    },
+    ImportTableSpec {
+        table: "project_documents",
+        identity: "d.project_id IS s.project_id AND d.document_id IS s.document_id",
+        columns: &["project_id", "document_id", "sort_order", "created_at", "removed_at"],
+    },
+    ImportTableSpec {
+        table: "source_excerpts",
+        identity: "d.id IS s.id",
+        columns: &["id", "document_id", "raw_text", "clean_text", "pdf_page", "print_page", "locator_json", "context_before", "context_after", "source_hash", "created_at"],
+    },
+    ImportTableSpec {
+        table: "synthesis_categories",
+        identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.name IS s.name)",
+        columns: &["id", "project_id", "name", "color", "sort_order", "is_default", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "research_roles",
+        identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.name IS s.name)",
+        columns: &["id", "project_id", "name", "color", "sort_order", "is_default", "is_archived", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "project_cards",
+        identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.excerpt_id IS s.excerpt_id)",
+        columns: &["id", "project_id", "excerpt_id", "text_override", "comment", "role", "category_id", "synthesis_state", "origin_kind", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "tags",
+        identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.name IS s.name)",
+        columns: &["id", "project_id", "name", "created_at"],
+    },
+    ImportTableSpec {
+        table: "project_card_tags",
+        identity: "d.project_card_id IS s.project_card_id AND d.tag_id IS s.tag_id",
+        columns: &["project_card_id", "tag_id"],
+    },
+    ImportTableSpec {
+        table: "project_card_roles",
+        identity: "d.project_card_id IS s.project_card_id AND d.research_role_id IS s.research_role_id",
+        columns: &["project_card_id", "research_role_id", "created_at"],
+    },
+    ImportTableSpec {
+        table: "pdf_annotations",
+        identity: "d.id IS s.id",
+        columns: &["id", "project_id", "document_id", "kind", "page_number", "color", "selected_text", "locator_json", "comment", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "reading_notes",
+        identity: "d.id IS s.id",
+        columns: &["id", "project_id", "document_id", "kind", "content", "selected_text", "page_number", "locator_json", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "outline_nodes",
+        identity: "d.id IS s.id",
+        columns: &["id", "project_id", "parent_id", "title", "notes", "core_argument", "open_questions", "sort_order", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
+        table: "outline_card_links",
+        identity: "d.id IS s.id OR (d.outline_node_id IS s.outline_node_id AND d.project_card_id IS s.project_card_id)",
+        columns: &["id", "outline_node_id", "project_card_id", "note", "sort_order", "created_at"],
+    },
+];
+
+fn inspect_import_database(
+    destination: &Connection,
+    source: &Path,
+) -> AppResult<(DatabaseImportPreview, Vec<Option<PathBuf>>)> {
+    destination.execute(
+        "ATTACH DATABASE ?1 AS import_preview",
+        params![source.to_string_lossy()],
+    )?;
+    let inspection = (|| -> AppResult<(DatabaseImportPreview, Vec<Option<PathBuf>>)> {
+        let mut preview = DatabaseImportPreview::default();
+        for spec in IMPORT_TABLES {
+            let source_count: i64 = destination.query_row(
+                &format!("SELECT COUNT(*) FROM import_preview.{}", spec.table),
+                [],
+                |row| row.get(0),
+            )?;
+            let added_count: i64 = destination.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM import_preview.{0} s WHERE NOT EXISTS (SELECT 1 FROM main.{0} d WHERE {1})",
+                    spec.table, spec.identity
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            let exact_match = spec
+                .columns
+                .iter()
+                .map(|column| format!("d.{column} IS s.{column}"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let conflict_count: i64 = destination.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM import_preview.{0} s WHERE EXISTS (SELECT 1 FROM main.{0} d WHERE {1}) AND NOT EXISTS (SELECT 1 FROM main.{0} d WHERE ({1}) AND {2})",
+                    spec.table, spec.identity, exact_match
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            let existing_count = source_count.saturating_sub(added_count);
+            preview.source_item_count = preview.source_item_count.saturating_add(source_count);
+            preview.added_item_count = preview.added_item_count.saturating_add(added_count);
+            preview.conflict_item_count =
+                preview.conflict_item_count.saturating_add(conflict_count);
+            preview.skipped_item_count = preview
+                .skipped_item_count
+                .saturating_add(existing_count.saturating_sub(conflict_count));
+            match spec.table {
+                "projects" => {
+                    preview.source_project_count = source_count;
+                    preview.created_project_count = added_count;
+                    preview.merged_project_count = existing_count;
+                }
+                "documents" => preview.source_document_count = source_count,
+                "project_cards" => preview.source_card_count = source_count,
+                "pdf_annotations" => preview.source_annotation_count = source_count,
+                "outline_nodes" => preview.source_outline_node_count = source_count,
+                _ => {}
+            }
+        }
+
+        let mut statement = destination.prepare(
+            r#"
+            SELECT CASE WHEN d.id IS NULL THEN s.file_path ELSE d.file_path END
+            FROM import_preview.documents s
+            LEFT JOIN main.documents d ON d.id = s.id
+            ORDER BY s.id
+            "#,
+        )?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, Option<String>>(0))?
+            .map(|value| value.map(|path| path.map(PathBuf::from)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((preview, paths))
+    })();
+    let detach = destination
+        .execute_batch("DETACH DATABASE import_preview")
+        .map_err(AppError::from);
+    inspection.and_then(|value| detach.map(|_| value))
+}
+
 fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult<()> {
     destination.execute(
         "ATTACH DATABASE ?1 AS import_db",
@@ -2203,8 +2786,6 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
             FROM resolved_outline_links
             WHERE project_card_id IS NOT NULL;
 
-            INSERT OR IGNORE INTO app_metadata (key, value)
-            SELECT key, value FROM import_db.app_metadata;
             "#,
         )?;
         transaction.commit()?;
@@ -2256,6 +2837,9 @@ fn validate_database_file(path: &Path) -> AppResult<()> {
     if version >= 7 {
         required_tables.push("research_roles");
         required_tables.push("project_card_roles");
+    }
+    if version >= 8 {
+        required_tables.push("backup_records");
     }
     for table in required_tables {
         let exists: i64 = connection.query_row(
@@ -3034,6 +3618,17 @@ mod tests {
                     color: None,
                 })
                 .expect("create target-only project");
+            let (preview, preview_paths) = target
+                .preview_database_import(&exported_path, &root, false)
+                .expect("preview complete database merge");
+            assert_eq!(preview.source_project_count, 3);
+            assert_eq!(preview.created_project_count, 1);
+            assert_eq!(preview.merged_project_count, 2);
+            assert!(preview.source_document_count > 0);
+            assert!(preview.source_card_count > 0);
+            assert!(preview.added_item_count > 0);
+            assert!(preview.conflict_item_count > 0);
+            assert_eq!(preview_paths.len() as i64, preview.source_document_count);
             let (source_project_count, created_project_count) = target
                 .import_database(&exported_path, &safety_path)
                 .expect("import complete database");
@@ -3163,6 +3758,13 @@ mod tests {
                     .expect("recount card role links"),
             );
             assert_eq!(counts_after_repeat, counts_before_repeat);
+            let (repeat_preview, _) = target
+                .preview_database_import(&exported_path, &root, false)
+                .expect("preview idempotent repeat merge");
+            assert_eq!(repeat_preview.created_project_count, 0);
+            assert_eq!(repeat_preview.added_item_count, 0);
+            assert!(repeat_preview.skipped_item_count > 0);
+            assert!(repeat_preview.conflict_item_count > 0);
             ensure_foreign_keys_are_valid(&target.connection)
                 .expect("foreign keys after repeated merge");
 
@@ -3693,9 +4295,19 @@ mod tests {
         fs::create_dir_all(&root).expect("create project export directory");
         let source_path = root.join("source.db");
         let export_path = root.join("project.db");
+        let manual_backup_path = root.join("manual-full.db");
 
         {
-            let source = Repository::open(&source_path).expect("open source repository");
+            let mut source = Repository::open(&source_path).expect("open source repository");
+            source
+                .set_backup_preferences(Some(&root), Some(30))
+                .expect("set source-only backup preferences");
+            source
+                .export_database(&manual_backup_path)
+                .expect("create source backup record fixture");
+            source
+                .record_backup(&manual_backup_path, "full", None, None)
+                .expect("record source-only manual backup");
             source
                 .export_project_database("seed-project-tombs", &export_path)
                 .expect("export selected project");
@@ -3721,6 +4333,20 @@ mod tests {
                 )
                 .expect("count unrelated excerpts");
             assert_eq!(unrelated_excerpts, 0);
+            let backup_records: i64 = exported
+                .connection
+                .query_row("SELECT COUNT(*) FROM backup_records", [], |row| row.get(0))
+                .expect("count exported backup records");
+            let local_backup_settings: i64 = exported
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM app_metadata WHERE key LIKE 'backup\\_%' ESCAPE '\\'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count exported local backup settings");
+            assert_eq!(backup_records, 0);
+            assert_eq!(local_backup_settings, 0);
             ensure_foreign_keys_are_valid(&exported.connection)
                 .expect("foreign keys in project export");
         }
@@ -4163,5 +4789,168 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
         std::fs::remove_dir_all(root).expect("remove test import directory");
+    }
+
+    #[test]
+    fn backup_preferences_survive_database_reopen() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-backups")
+            .join(Uuid::new_v4().to_string());
+        let custom_directory = root.join("custom");
+        fs::create_dir_all(&custom_directory).expect("create custom backup directory");
+        let database_path = root.join("inkstone.db");
+
+        {
+            let mut repository = Repository::open(&database_path).expect("open database");
+            repository
+                .set_backup_preferences(Some(&custom_directory), Some(90))
+                .expect("save backup preferences");
+        }
+
+        {
+            let repository = Repository::open(&database_path).expect("reopen database");
+            let preferences = repository
+                .backup_preferences()
+                .expect("read persisted backup preferences");
+            assert_eq!(
+                preferences.custom_directory.as_deref(),
+                Some(custom_directory.to_string_lossy().as_ref())
+            );
+            assert_eq!(preferences.retention_days, Some(90));
+        }
+
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{}", database_path.display(), suffix));
+        }
+        fs::remove_dir(&custom_directory).expect("remove empty custom directory");
+        fs::remove_dir(&root).expect("remove empty backup test root");
+    }
+
+    #[test]
+    fn automatic_backup_cleanup_is_scoped_and_keeps_three_valid_backups() {
+        let mut repository = Repository::memory().expect("memory database");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-backups")
+            .join(Uuid::new_v4().to_string());
+        let current_directory = root.join("current");
+        let other_directory = root.join("other");
+        fs::create_dir_all(&current_directory).expect("create current backup directory");
+        fs::create_dir_all(&other_directory).expect("create other backup directory");
+
+        let mut automatic_paths = Vec::new();
+        for (index, age_days) in [40_i64, 41, 42, 43, 44].into_iter().enumerate() {
+            let path = current_directory.join(format!(
+                "inkstone-before-import-2026010{}-auto{}.db",
+                index + 1,
+                index
+            ));
+            fs::write(&path, vec![index as u8; 10 + index]).expect("write automatic backup");
+            repository
+                .record_backup(&path, "auto", None, Some(&current_directory))
+                .expect("record automatic backup");
+            repository
+                .connection
+                .execute(
+                    "UPDATE backup_records SET created_at = ?1 WHERE path = ?2",
+                    params![
+                        (Utc::now() - ChronoDuration::days(age_days)).to_rfc3339(),
+                        path.to_string_lossy()
+                    ],
+                )
+                .expect("age automatic backup record");
+            automatic_paths.push(path);
+        }
+
+        let manual_path = current_directory.join("manual-full-export.db");
+        fs::write(&manual_path, vec![7_u8; 31]).expect("write manual export");
+        repository
+            .record_backup(&manual_path, "full", None, None)
+            .expect("record manual export");
+        repository
+            .connection
+            .execute(
+                "UPDATE backup_records SET created_at = ?1 WHERE path = ?2",
+                params![
+                    (Utc::now() - ChronoDuration::days(120)).to_rfc3339(),
+                    manual_path.to_string_lossy()
+                ],
+            )
+            .expect("age manual export record");
+
+        let outside_path = other_directory.join("inkstone-before-import-20250101-outside.db");
+        fs::write(&outside_path, vec![8_u8; 29]).expect("write outside automatic backup");
+        repository
+            .record_backup(&outside_path, "auto", None, Some(&current_directory))
+            .expect("record outside automatic backup");
+        repository
+            .connection
+            .execute(
+                "UPDATE backup_records SET created_at = ?1 WHERE path = ?2",
+                params![
+                    (Utc::now() - ChronoDuration::days(130)).to_rfc3339(),
+                    outside_path.to_string_lossy()
+                ],
+            )
+            .expect("age outside automatic backup record");
+
+        let pdf_path = current_directory.join("source-document.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\nnot part of database backups\n")
+            .expect("write unrelated PDF");
+
+        let cleanup = repository
+            .cleanup_automatic_backups(&current_directory, Some(30))
+            .expect("cleanup automatic backups");
+
+        assert_eq!(cleanup.deleted_count, 2);
+        assert_eq!(cleanup.freed_bytes, 13 + 14);
+        assert_eq!(cleanup.failed_count, 1);
+        assert!(automatic_paths[0].is_file());
+        assert!(automatic_paths[1].is_file());
+        assert!(automatic_paths[2].is_file());
+        assert!(!automatic_paths[3].exists());
+        assert!(!automatic_paths[4].exists());
+        assert!(
+            manual_path.is_file(),
+            "manual exports must never be auto-cleaned"
+        );
+        assert!(
+            outside_path.is_file(),
+            "files outside the active directory must remain"
+        );
+        assert!(
+            pdf_path.is_file(),
+            "PDF originals must not be touched by cleanup"
+        );
+        let preferences = repository
+            .backup_preferences()
+            .expect("read cleanup metadata");
+        assert!(preferences.last_cleanup_at.is_some());
+        assert!(preferences
+            .last_cleanup_result
+            .as_deref()
+            .is_some_and(|summary| summary.contains("删除 2 份")));
+        assert!(repository
+            .delete_automatic_backup(
+                &repository
+                    .backup_records()
+                    .expect("backup records")
+                    .into_iter()
+                    .find(|record| record.kind == "full")
+                    .expect("manual record")
+                    .id
+            )
+            .is_err());
+
+        for path in automatic_paths.into_iter().take(3) {
+            fs::remove_file(path).expect("remove surviving automatic backup");
+        }
+        fs::remove_file(manual_path).expect("remove manual export");
+        fs::remove_file(outside_path).expect("remove outside backup");
+        fs::remove_file(pdf_path).expect("remove unrelated PDF");
+        fs::remove_dir(&current_directory).expect("remove empty current directory");
+        fs::remove_dir(&other_directory).expect("remove empty other directory");
+        fs::remove_dir(&root).expect("remove empty backup test root");
     }
 }

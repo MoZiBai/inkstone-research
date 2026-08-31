@@ -8,7 +8,10 @@ import type {
   CreateProjectInput,
   CreateReadingNoteInput,
   CreateResearchRoleInput,
+  BackupCleanupResult,
+  BackupManagerState,
   DatabaseImportResult,
+  DatabaseImportPreview,
   ImportPdfInput,
   ImportPdfResult,
   InkstoneApi,
@@ -23,6 +26,7 @@ import type {
   UpdateProjectInput,
   UpdateReadingNoteInput,
   UpdateResearchRoleInput,
+  UpdateBackupSettingsInput,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -53,6 +57,16 @@ export const api: InkstoneApi = {
     invoke<DatabaseImportResult>('import_database', { sourcePath }),
   importProjectDatabase: (sourcePath: string) =>
     invoke<DatabaseImportResult>('import_project_database', { sourcePath }),
+  previewDatabaseImport: (sourcePath: string, projectOnly: boolean) =>
+    invoke<DatabaseImportPreview>('preview_database_import', { sourcePath, projectOnly }),
+  getBackupManager: () => invoke<BackupManagerState>('get_backup_manager'),
+  updateBackupSettings: (input: UpdateBackupSettingsInput) =>
+    invoke<BackupManagerState>('update_backup_settings', { input }),
+  cleanupBackups: () => invoke<BackupCleanupResult>('cleanup_backups'),
+  deleteAutomaticBackup: (backupId: string) =>
+    invoke<void>('delete_automatic_backup', { backupId }),
+  revealBackup: (backupId: string) => invoke<void>('reveal_backup', { backupId }),
+  revealBackupDirectory: () => invoke<void>('reveal_backup_directory'),
   readPdf: (documentId: string) => invoke<ArrayBuffer>('read_pdf', { documentId }),
   revealPdfInFileManager: (documentId: string) =>
     invoke<void>('reveal_pdf_in_file_manager', { documentId }),
