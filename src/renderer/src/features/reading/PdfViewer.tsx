@@ -426,7 +426,11 @@ export function PdfViewer({
         const selectedText = browserSelection.toString()
         if (!selectedText.trim()) return
 
-        const rangeRects = Array.from(range.getClientRects())
+        const rangeRects = selectionClientRects(range, pageRefs.current.values())
+        if (rangeRects.length === 0) {
+          onNotify('没有取得有效的文字范围，请重新选择文字。')
+          return
+        }
         const touchedPages = Array.from(pageRefs.current.entries()).filter(([, candidate]) => {
           const candidateRect = candidate.getBoundingClientRect()
           return rangeRects.some((rect) => rectanglesOverlap(rect, candidateRect))
@@ -436,7 +440,7 @@ export function PdfViewer({
           clearSelection()
           return
         }
-        const locator = locatorFromRange(range, pageElement, pageNumber)
+        const locator = locatorFromRange(range, pageElement, pageNumber, rangeRects)
         if (!locator) {
           onNotify('没有取得有效的文字位置，请重新选择文字。')
           return
@@ -953,6 +957,28 @@ function rectanglesOverlap(first: DOMRect, second: DOMRect): boolean {
     first.bottom > second.top &&
     first.top < second.bottom
   )
+}
+
+function selectionClientRects(
+  range: Range,
+  pageElements: Iterable<HTMLElement>
+): DOMRect[] {
+  const endMarkers = Array.from(pageElements).flatMap((pageElement) =>
+    Array.from(pageElement.querySelectorAll<HTMLElement>('.textLayer .endOfContent'))
+  )
+  const previousDisplay = endMarkers.map((marker) => marker.style.display)
+  for (const marker of endMarkers) marker.style.display = 'none'
+  try {
+    return Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0.1 && rect.height > 0.1
+    )
+  } finally {
+    endMarkers.forEach((marker, index) => {
+      const display = previousDisplay[index]
+      if (display) marker.style.display = display
+      else marker.style.removeProperty('display')
+    })
+  }
 }
 
 function unionRects(rects: DOMRect[]): DOMRect {

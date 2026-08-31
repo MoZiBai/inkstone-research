@@ -41,12 +41,13 @@ export function parsePdfLocator(value: string, expectedPage?: number): PdfLocato
 export function locatorFromRange(
   range: Range,
   pageElement: HTMLElement,
-  pageNumber: number
+  pageNumber: number,
+  clientRects: readonly DOMRect[] = Array.from(range.getClientRects())
 ): PdfLocator | null {
   const pageRect = pageElement.getBoundingClientRect()
   if (pageRect.width <= 0 || pageRect.height <= 0) return null
 
-  const rects = Array.from(range.getClientRects())
+  const rects = clientRects
     .map((rect) => intersectRect(rect, pageRect))
     .filter((rect): rect is DOMRect => rect !== null)
     .map((rect) => ({
