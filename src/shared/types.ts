@@ -215,6 +215,7 @@ export interface CreateCardFromSelectionInput {
   comment?: string
   role: CardRole
   tags?: string[]
+  sourceReadingNoteId?: string | null
 }
 
 export interface CreatePdfAnnotationInput {

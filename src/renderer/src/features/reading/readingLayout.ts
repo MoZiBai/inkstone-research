@@ -7,12 +7,12 @@ export type ReadingPanel = keyof ReadingPanelWidths
 
 export const DEFAULT_READING_PANEL_WIDTHS: ReadingPanelWidths = {
   documents: 240,
-  inspector: 280
+  inspector: 250
 }
 
 export const READING_PANEL_LIMITS = {
   documents: { min: 180, max: 520 },
-  inspector: { min: 220, max: 640 },
+  inspector: { min: 210, max: 520 },
   pdfMin: 360,
   handleTotal: 14
 } as const

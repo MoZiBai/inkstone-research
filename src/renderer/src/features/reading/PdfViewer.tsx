@@ -6,7 +6,9 @@ import {
   LoaderCircle,
   Maximize2,
   MousePointer2,
+  Trash2,
   Underline,
+  X,
   ZoomIn,
   ZoomOut
 } from 'lucide-react'
@@ -30,7 +32,13 @@ import type {
 } from '@shared/types'
 import { api } from '../../lib/api'
 import type { Notify } from '../../types'
-import { buildContext, locatorFromRange, parsePdfLocator, type PdfSelection } from './pdfLocator'
+import {
+  buildContext,
+  locatorFromRange,
+  parsePdfLocator,
+  pdfLocatorContainsPoint,
+  type PdfSelection
+} from './pdfLocator'
 import { clampPdfScale, scaleFromCtrlWheel } from './pdfZoom'
 
 GlobalWorkerOptions.workerSrc = workerUrl
@@ -45,6 +53,8 @@ interface PdfViewerProps {
   onCreateCard: (selection: PdfSelection) => void
   onCreateAnnotation: (selection: PdfSelection, kind: PdfAnnotationKind) => void
   onCreateReadingNote: (selection: PdfSelection, kind: 'insight' | 'critique') => void
+  onRequestDeleteAnnotation: (annotation: PdfAnnotation) => void
+  onCurrentPageChange: (pageNumber: number) => void
   onNotify: Notify
 }
 
@@ -59,6 +69,11 @@ interface ToolbarPosition {
   top: number
 }
 
+interface AnnotationMenuState extends ToolbarPosition {
+  pageNumber: number
+  annotations: PdfAnnotation[]
+}
+
 export function PdfViewer({
   document,
   annotations,
@@ -69,6 +84,8 @@ export function PdfViewer({
   onCreateCard,
   onCreateAnnotation,
   onCreateReadingNote,
+  onRequestDeleteAnnotation,
+  onCurrentPageChange,
   onNotify
 }: PdfViewerProps): React.JSX.Element {
   const stageRef = useRef<HTMLDivElement>(null)
@@ -92,10 +109,12 @@ export function PdfViewer({
   const [loadError, setLoadError] = useState('')
   const [selection, setSelection] = useState<PdfSelection | null>(null)
   const [toolbarPosition, setToolbarPosition] = useState<ToolbarPosition | null>(null)
+  const [annotationMenu, setAnnotationMenu] = useState<AnnotationMenuState | null>(null)
 
   const clearSelection = useCallback((): void => {
     setSelection(null)
     setToolbarPosition(null)
+    setAnnotationMenu(null)
     window.getSelection()?.removeAllRanges()
   }, [])
 
@@ -212,20 +231,14 @@ export function PdfViewer({
     }
   }, [document.id])
 
+  useEffect(() => onCurrentPageChange(currentPage), [currentPage, onCurrentPageChange])
+
   useEffect(() => {
     const root = stageRef.current
     if (!root || pages.length === 0) return
 
-    const observer = new IntersectionObserver(
+    const renderObserver = new IntersectionObserver(
       (entries) => {
-        let mostVisible: { page: number; ratio: number } | null = null
-        for (const entry of entries) {
-          const pageNumber = Number((entry.target as HTMLElement).dataset.pageNumber)
-          if (!Number.isInteger(pageNumber) || !entry.isIntersecting) continue
-          if (!mostVisible || entry.intersectionRatio > mostVisible.ratio) {
-            mostVisible = { page: pageNumber, ratio: entry.intersectionRatio }
-          }
-        }
         setVisiblePages((current) => {
           const next = new Set(current)
           for (const entry of entries) {
@@ -236,13 +249,42 @@ export function PdfViewer({
           }
           return next
         })
-        if (mostVisible !== null) setCurrentPage(mostVisible.page)
       },
       { root, rootMargin: '900px 0px', threshold: [0, 0.1, 0.5, 0.9] }
     )
 
-    for (const element of pageRefs.current.values()) observer.observe(element)
-    return () => observer.disconnect()
+    const actualVisibility = new Map<number, number>()
+    const pageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const pageNumber = Number((entry.target as HTMLElement).dataset.pageNumber)
+          if (!Number.isInteger(pageNumber)) continue
+          if (entry.isIntersecting) actualVisibility.set(pageNumber, entry.intersectionRatio)
+          else actualVisibility.delete(pageNumber)
+        }
+        setCurrentPage((current) => {
+          let next = current
+          let bestRatio = actualVisibility.get(current) ?? -1
+          for (const [pageNumber, ratio] of actualVisibility) {
+            if (ratio > bestRatio + 0.001) {
+              next = pageNumber
+              bestRatio = ratio
+            }
+          }
+          return next
+        })
+      },
+      { root, threshold: [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1] }
+    )
+
+    for (const element of pageRefs.current.values()) {
+      renderObserver.observe(element)
+      pageObserver.observe(element)
+    }
+    return () => {
+      renderObserver.disconnect()
+      pageObserver.disconnect()
+    }
   }, [document.id, pages.length, scale])
 
   const firstPageWidth = pages[0]?.width ?? 0
@@ -399,6 +441,7 @@ export function PdfViewer({
           contextAfter: context.after,
           clientRect
         })
+        setAnnotationMenu(null)
         const toolbarWidth = Math.min(510, window.innerWidth - 24)
         setToolbarPosition({
           left: Math.min(
@@ -410,6 +453,29 @@ export function PdfViewer({
       })
     },
     [clearSelection, onNotify]
+  )
+
+  const openAnnotationMenu = useCallback(
+    (
+      pageNumber: number,
+      matchedAnnotations: PdfAnnotation[],
+      clientX: number,
+      clientY: number
+    ): void => {
+      clearSelection()
+      const menuWidth = Math.min(310, Math.max(0, window.innerWidth - 24))
+      const menuHeight = Math.min(274, 46 + matchedAnnotations.length * 54)
+      const left = Math.min(
+        window.innerWidth - menuWidth - 12,
+        Math.max(12, clientX - menuWidth / 2)
+      )
+      const preferredTop = clientY > window.innerHeight * 0.65
+        ? clientY - menuHeight - 12
+        : clientY + 12
+      const top = Math.max(12, Math.min(window.innerHeight - menuHeight - 12, preferredTop))
+      setAnnotationMenu({ pageNumber, annotations: matchedAnnotations, left, top })
+    },
+    [clearSelection]
   )
 
   const createCard = (): void => {
@@ -492,7 +558,14 @@ export function PdfViewer({
   }
 
   return (
-    <div className="pdf-viewer">
+    <div
+      className="pdf-viewer"
+      onPointerDownCapture={(event) => {
+        if (!annotationMenu) return
+        const target = event.target instanceof Element ? event.target : null
+        if (!target?.closest('.pdf-annotation-menu')) setAnnotationMenu(null)
+      }}
+    >
       <div className="pdf-toolbar" role="toolbar" aria-label="PDF 阅读工具">
         <div className="pdf-toolbar-group">
           <button
@@ -586,6 +659,7 @@ export function PdfViewer({
               annotations={pageAnnotations.get(pageInfo.pageNumber) ?? []}
               cards={cardsByPage.get(pageInfo.pageNumber) ?? []}
               onSelection={handleSelection}
+              onAnnotationClick={openAnnotationMenu}
               pageRef={pageRefFor(pageInfo.pageNumber)}
             />
           ))}
@@ -617,6 +691,52 @@ export function PdfViewer({
           </button>
         </div>
       ) : null}
+
+      {annotationMenu ? (
+        <aside
+          className="pdf-annotation-menu"
+          style={{ left: annotationMenu.left, top: annotationMenu.top }}
+          role="dialog"
+          aria-label={`PDF 第 ${annotationMenu.pageNumber} 页批注`}
+        >
+          <header>
+            <span>
+              第 {annotationMenu.pageNumber} 页
+              {annotationMenu.annotations.length > 1
+                ? ` · ${annotationMenu.annotations.length} 条重叠批注`
+                : ' · 当前批注'}
+            </span>
+            <button type="button" onClick={() => setAnnotationMenu(null)} aria-label="关闭批注菜单">
+              <X size={13} />
+            </button>
+          </header>
+          <div className="pdf-annotation-menu-items">
+            {annotationMenu.annotations.map((annotation) => (
+              <div key={annotation.id}>
+                <span className={`annotation-kind ${annotation.kind}`}>
+                  {annotation.kind === 'highlight' ? <Highlighter size={13} /> : <Underline size={13} />}
+                </span>
+                <span>
+                  <strong>{annotation.kind === 'highlight' ? '高亮' : '下划线'}</strong>
+                  <small>{annotation.selectedText || '未记录文字'}</small>
+                </span>
+                <button
+                  className="annotation-delete"
+                  type="button"
+                  title="删除这条批注"
+                  aria-label={`删除${annotation.kind === 'highlight' ? '高亮' : '下划线'}`}
+                  onClick={() => {
+                    setAnnotationMenu(null)
+                    onRequestDeleteAnnotation(annotation)
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </aside>
+      ) : null}
     </div>
   )
 }
@@ -629,6 +749,12 @@ interface PdfPageViewProps {
   annotations: PdfAnnotation[]
   cards: ProjectCardView[]
   onSelection: (pageNumber: number, pageElement: HTMLDivElement) => void
+  onAnnotationClick: (
+    pageNumber: number,
+    annotations: PdfAnnotation[],
+    clientX: number,
+    clientY: number
+  ) => void
   pageRef: (element: HTMLDivElement | null) => void
 }
 
@@ -640,6 +766,7 @@ const PdfPageView = memo(function PdfPageView({
   annotations,
   cards,
   onSelection,
+  onAnnotationClick,
   pageRef
 }: PdfPageViewProps): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -733,6 +860,21 @@ const PdfPageView = memo(function PdfPageView({
       onMouseUp={(event) => {
         const pageElement = event.currentTarget
         onSelection(pageInfo.pageNumber, pageElement)
+      }}
+      onClick={(event) => {
+        const browserSelection = window.getSelection()
+        if (browserSelection && !browserSelection.isCollapsed) return
+        const pageRect = event.currentTarget.getBoundingClientRect()
+        if (pageRect.width <= 0 || pageRect.height <= 0) return
+        const x = (event.clientX - pageRect.left) / pageRect.width
+        const y = (event.clientY - pageRect.top) / pageRect.height
+        const matched = annotations.filter((annotation) => {
+          const locator = parsePdfLocator(annotation.locatorJson, pageInfo.pageNumber)
+          return locator ? pdfLocatorContainsPoint(locator, x, y) : false
+        })
+        if (matched.length > 0) {
+          onAnnotationClick(pageInfo.pageNumber, matched, event.clientX, event.clientY)
+        }
       }}
       aria-label={`PDF 第 ${pageInfo.pageNumber} 页`}
     >

@@ -11,7 +11,7 @@ describe('reading panel layout', () => {
     expect(normalizeReadingPanelWidths(null)).toEqual(DEFAULT_READING_PANEL_WIDTHS)
     expect(normalizeReadingPanelWidths({ documents: 20, inspector: 900 })).toEqual({
       documents: 180,
-      inspector: 640
+      inspector: 520
     })
   })
 
@@ -19,7 +19,7 @@ describe('reading panel layout', () => {
     const fitted = fitReadingPanelWidths({ documents: 500, inspector: 600 }, 1000)
     expect(fitted.documents + fitted.inspector).toBeLessThanOrEqual(626)
     expect(fitted.documents).toBeGreaterThanOrEqual(180)
-    expect(fitted.inspector).toBeGreaterThanOrEqual(220)
+    expect(fitted.inspector).toBeGreaterThanOrEqual(210)
   })
 
   it('resizes either side panel from its adjacent separator', () => {

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "砚台主窗口的最小权限集合",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
 }

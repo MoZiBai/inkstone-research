@@ -90,6 +90,22 @@ export function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
+export function pdfLocatorContainsPoint(
+  locator: PdfLocator,
+  x: number,
+  y: number,
+  padding = 0.004
+): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return false
+  return locator.rects.some(
+    (rect) =>
+      x >= rect.x - padding &&
+      x <= rect.x + rect.width + padding &&
+      y >= rect.y - padding &&
+      y <= rect.y + rect.height + padding
+  )
+}
+
 function intersectRect(first: DOMRect, second: DOMRect): DOMRect | null {
   const left = Math.max(first.left, second.left)
   const top = Math.max(first.top, second.top)

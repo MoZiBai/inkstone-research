@@ -277,6 +277,8 @@ pub struct CreateCardFromSelectionInput {
     pub role: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub source_reading_note_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

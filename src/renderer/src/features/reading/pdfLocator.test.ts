@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { buildContext, mergePdfRects, normalizeWhitespace, parsePdfLocator } from './pdfLocator'
+import {
+  buildContext,
+  mergePdfRects,
+  normalizeWhitespace,
+  parsePdfLocator,
+  pdfLocatorContainsPoint
+} from './pdfLocator'
 
 describe('PDF locator helpers', () => {
   it('parses normalized locators and rejects malformed coordinates', () => {
@@ -67,5 +73,15 @@ describe('PDF locator helpers', () => {
       { x: 0.1, y: 0.2, width: 0.18, height: 0.025 },
       { x: 0.65, y: 0.2, width: 0.12, height: 0.025 }
     ])
+  })
+
+  it('detects clicks on a saved annotation rectangle with a small edge tolerance', () => {
+    const locator = {
+      page: 2,
+      rects: [{ x: 0.1, y: 0.2, width: 0.3, height: 0.04 }]
+    }
+    expect(pdfLocatorContainsPoint(locator, 0.2, 0.22)).toBe(true)
+    expect(pdfLocatorContainsPoint(locator, 0.402, 0.22)).toBe(true)
+    expect(pdfLocatorContainsPoint(locator, 0.7, 0.22)).toBe(false)
   })
 })

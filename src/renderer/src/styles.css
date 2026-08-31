@@ -134,23 +134,31 @@ select:focus-visible {
 }
 
 .sidebar-collapse-button {
-  position: absolute;
-  z-index: 5;
-  top: 78px;
-  right: -15px;
-  display: grid;
-  width: 29px;
-  height: 29px;
+  display: flex;
+  width: 100%;
+  min-height: 31px;
   flex: 0 0 auto;
-  place-items: center;
-  padding: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  padding: 0 9px;
   color: rgba(232, 228, 216, 0.56);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
-  box-shadow: 0 4px 14px rgba(20, 24, 23, 0.22);
   transition: color 160ms ease, border-color 160ms ease, background 160ms ease,
-    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    width 220ms cubic-bezier(0.22, 1, 0.36, 1), padding 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sidebar-collapse-button span {
+  max-width: 110px;
+  opacity: 1;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: max-width 180ms ease, opacity 130ms ease;
 }
 
 .sidebar-collapse-button:hover {
@@ -422,6 +430,18 @@ select:focus-visible {
 
 .sidebar-collapsed .sidebar-footer {
   padding: 14px 5px 0;
+}
+
+.sidebar-collapsed .sidebar-collapse-button {
+  width: 36px;
+  margin-right: auto;
+  margin-left: auto;
+  padding: 0;
+}
+
+.sidebar-collapsed .sidebar-collapse-button span {
+  max-width: 0;
+  opacity: 0;
 }
 
 .sidebar-collapsed .local-database-status {
@@ -971,7 +991,7 @@ select:focus-visible {
     7px
     minmax(360px, 1fr)
     7px
-    var(--reading-inspector-width, 280px);
+    var(--reading-inspector-width, 250px);
   height: 100%;
   min-height: 0;
   background: var(--paper-100);
@@ -1289,31 +1309,128 @@ body.reading-panel-resizing * {
 }
 
 .reading-inspector {
+  display: grid;
   min-width: 0;
+  align-content: start;
+  gap: 8px;
   overflow: auto;
-  padding: 29px 21px;
+  padding: 12px 10px 22px;
   border-left: 0;
   background: rgba(252, 251, 247, 0.72);
 }
 
-.reading-inspector h3 {
-  margin: 7px 0 7px;
-  font-family: var(--serif);
-  font-size: 20px;
+.reading-inspector-section {
+  overflow: hidden;
+  border: 1px solid rgba(67, 78, 72, 0.11);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(49, 56, 52, 0.035);
 }
 
-.reading-inspector > p {
+.reading-inspector-section.collapsed {
+  background: rgba(247, 245, 239, 0.7);
+}
+
+.reading-inspector-section-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 9px;
+  color: var(--ink-700);
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+
+.reading-inspector-section-toggle:hover {
+  color: var(--ink-900);
+  background: rgba(240, 235, 225, 0.58);
+}
+
+.reading-inspector-section-toggle > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.reading-inspector-section-toggle strong {
+  overflow: hidden;
+  color: inherit;
+  font-family: var(--serif);
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-inspector-section-toggle .eyebrow {
+  font-size: 9px;
+}
+
+.reading-inspector-section-count {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0 4px;
+  color: var(--ink-600);
+  font-size: 10px;
+  border-radius: 8px;
+  background: var(--paper-200);
+}
+
+.reading-inspector-section-toggle > svg {
+  color: var(--ink-500);
+}
+
+.reading-inspector-section-body {
+  padding: 0 9px 10px;
+  border-top: 1px solid rgba(67, 78, 72, 0.08);
+}
+
+.reading-inspector-description {
   margin: 0;
   color: var(--ink-600);
-  font-size: 12px;
-  line-height: 1.75;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.reading-inspector-section-body > .reading-inspector-description {
+  margin-top: 9px;
+}
+
+.reading-inspector-empty,
+.reading-inspector-empty-document {
+  margin: 9px 0 0;
+  padding: 12px 8px;
+  color: var(--ink-500);
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.reading-inspector-empty-document {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+
+.reading-inspector-empty-document strong {
+  color: var(--ink-700);
+  font-family: var(--serif);
+  font-size: 13px;
 }
 
 .document-inspector-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 13px;
+  margin-top: 9px;
 }
 
 .document-inspector-actions .button {
@@ -1325,29 +1442,37 @@ body.reading-panel-resizing * {
 
 .inspector-list {
   display: grid;
-  gap: 8px;
-  margin: 23px 0 0;
+  gap: 0;
+  margin: 9px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
 }
 
 .inspector-list div {
   display: grid;
-  gap: 4px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.6);
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(67, 78, 72, 0.08);
+}
+
+.inspector-list div:last-child {
+  border-bottom: 0;
 }
 
 .inspector-list dt {
   color: var(--ink-500);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .inspector-list dd {
   overflow: hidden;
   margin: 0;
   color: var(--ink-800);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1356,10 +1481,10 @@ body.reading-panel-resizing * {
 .boundary-note {
   display: grid;
   gap: 5px;
-  margin-top: 18px;
-  padding: 12px;
+  margin-top: 9px;
+  padding: 8px;
   color: #876b5c;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.65;
   border: 1px solid rgba(164, 95, 69, 0.16);
   border-radius: 9px;
@@ -1411,6 +1536,9 @@ body.reading-panel-resizing * {
   display: grid;
   gap: 6px;
   margin-top: 9px;
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .reading-note-item {
@@ -3822,6 +3950,93 @@ body.reading-panel-resizing * {
   background: var(--terracotta-soft);
 }
 
+.pdf-annotation-menu {
+  position: fixed;
+  z-index: 125;
+  width: min(310px, calc(100vw - 24px));
+  overflow: hidden;
+  color: var(--ink-800);
+  border: 1px solid rgba(58, 64, 59, 0.17);
+  border-radius: 10px;
+  background: rgba(255, 255, 252, 0.98);
+  box-shadow: 0 12px 30px rgba(35, 42, 38, 0.22);
+  backdrop-filter: blur(12px);
+}
+
+.pdf-annotation-menu > header {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px 5px 10px;
+  color: var(--ink-600);
+  font-size: 11px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper-150);
+}
+
+.pdf-annotation-menu > header button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  color: var(--ink-500);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.pdf-annotation-menu > header button:hover {
+  color: var(--ink-900);
+  background: var(--paper-300);
+}
+
+.pdf-annotation-menu-items {
+  display: grid;
+  max-height: 230px;
+  overflow: auto;
+  padding: 5px;
+}
+
+.pdf-annotation-menu-items > div {
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border-radius: 7px;
+}
+
+.pdf-annotation-menu-items > div:hover {
+  background: #fffaf4;
+}
+
+.pdf-annotation-menu-items > div > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pdf-annotation-menu-items strong,
+.pdf-annotation-menu-items small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-annotation-menu-items strong {
+  font-size: 11px;
+}
+
+.pdf-annotation-menu-items small {
+  color: var(--ink-500);
+  font-family: var(--serif);
+  font-size: 11px;
+}
+
 .selection-tool-mark {
   display: grid;
   width: 15px;
@@ -3873,6 +4088,27 @@ body.reading-panel-resizing * {
   display: grid;
   gap: 6px;
   margin-top: 9px;
+  max-height: 300px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.reading-page-group-label {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 4px 6px;
+  color: var(--ink-500);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  border-radius: 5px;
+  background: rgba(239, 236, 228, 0.96);
+}
+
+.reading-page-group-label.current {
+  color: var(--terracotta-dark);
+  background: rgba(244, 229, 215, 0.94);
 }
 
 .reading-reference-item {
@@ -3891,6 +4127,19 @@ body.reading-panel-resizing * {
 .reading-reference-item:hover {
   border-color: rgba(164, 95, 69, 0.22);
   background: #fffaf4;
+}
+
+.reading-reference-item.current-page,
+.reading-annotation-item.current-page {
+  border-color: rgba(164, 95, 69, 0.28);
+  background: #fff7ef;
+  box-shadow: inset 3px 0 0 var(--terracotta);
+}
+
+.reading-reference-item.current-page small,
+.reading-annotation-item.current-page small {
+  color: var(--terracotta-dark);
+  font-weight: 700;
 }
 
 .reading-reference-page {

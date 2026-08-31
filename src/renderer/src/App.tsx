@@ -222,16 +222,6 @@ export default function App(): React.JSX.Element {
           </span>
         </header>
 
-        <button
-          className="sidebar-collapse-button"
-          type="button"
-          aria-label={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
-          title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
-          onClick={() => setSidebarCollapsed((current) => !current)}
-        >
-          {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
-        </button>
-
         <div className="sidebar-section-heading">
           <span>我的项目</span>
           <button
@@ -270,6 +260,16 @@ export default function App(): React.JSX.Element {
         </nav>
 
         <footer className="sidebar-footer">
+          <button
+            className="sidebar-collapse-button"
+            type="button"
+            aria-label={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+            title={sidebarCollapsed ? '展开项目栏' : '收起项目栏'}
+            onClick={() => setSidebarCollapsed((current) => !current)}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            <span>{sidebarCollapsed ? '展开项目栏' : '收起项目栏'}</span>
+          </button>
           <div className="local-database-status" title={mutating ? '本地 SQLite：正在保存更改' : '本地 SQLite：已连接并自动持久化'}>
             <Database size={15} />
             <span>

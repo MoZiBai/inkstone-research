@@ -1,6 +1,7 @@
 import {
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   FilePlus2,
   FilePenLine,
@@ -43,6 +44,7 @@ import {
 } from './bibliographyParser'
 import { titleAfterPdfSelection } from './pdfImportDraft'
 import { parsePdfLocator, type PdfSelection } from './pdfLocator'
+import { partitionItemsByPage } from './readingPageItems'
 import { selectionFromReadingNote } from './readingNoteCardDraft'
 import {
   adjustReadingPanel,
@@ -105,6 +107,7 @@ const EMPTY_METADATA: MetadataDraft = {
 }
 
 const READING_PANEL_STORAGE_KEY = 'inkstone:reading-panel-widths:v1'
+type ReadingInspectorSection = 'document' | 'notes' | 'cards' | 'annotations'
 
 export function ReadingView({
   snapshot,
@@ -124,6 +127,7 @@ export function ReadingView({
   const [pendingCard, setPendingCard] = useState<{
     selection: PdfSelection
     initialComment: string
+    sourceReadingNoteId: string | null
   } | null>(null)
   const [editingDocument, setEditingDocument] = useState<DocumentSummary | null>(null)
   const [removingDocument, setRemovingDocument] = useState<DocumentSummary | null>(null)
@@ -135,6 +139,10 @@ export function ReadingView({
   const [deletingNote, setDeletingNote] = useState<ReadingNote | null>(null)
   const [focusRequest, setFocusRequest] = useState<ReadingFocusRequest | null>(initialRequest ?? null)
   const [deletingAnnotation, setDeletingAnnotation] = useState<PdfAnnotation | null>(null)
+  const [currentPdfPage, setCurrentPdfPage] = useState(1)
+  const [collapsedInspectorSections, setCollapsedInspectorSections] = useState<
+    Set<ReadingInspectorSection>
+  >(() => new Set(['document']))
   const [panelWidths, setPanelWidths] = useState<ReadingPanelWidths>(loadReadingPanelWidths)
   const [resizingPanel, setResizingPanel] = useState<ReadingPanel | null>(null)
   const focusCounter = useRef(0)
@@ -155,6 +163,19 @@ export function ReadingView({
   const documentNotes = useMemo(
     () => snapshot.readingNotes.filter((note) => note.documentId === selectedDocument?.id),
     [selectedDocument?.id, snapshot.readingNotes]
+  )
+  const cardPagePartition = useMemo(
+    () => partitionItemsByPage(documentCards, currentPdfPage, (card) => card.pdfPage),
+    [currentPdfPage, documentCards]
+  )
+  const annotationPagePartition = useMemo(
+    () =>
+      partitionItemsByPage(
+        documentAnnotations,
+        currentPdfPage,
+        (annotation) => annotation.pageNumber
+      ),
+    [currentPdfPage, documentAnnotations]
   )
   const activeDocuments = useMemo(
     () => snapshot.documents.filter((document) => !document.isRemoved),
@@ -179,6 +200,8 @@ export function ReadingView({
     if (snapshot.documents.some((document) => document.id === selectedDocumentId)) return
     setSelectedDocumentId(activeDocuments[0]?.id ?? null)
   }, [activeDocuments, selectedDocumentId, snapshot.currentProjectId, snapshot.documents])
+
+  useEffect(() => setCurrentPdfPage(1), [selectedDocument?.id])
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -241,6 +264,15 @@ export function ReadingView({
         layoutWidth
       )
     )
+  }
+
+  const toggleInspectorSection = (section: ReadingInspectorSection): void => {
+    setCollapsedInspectorSections((current) => {
+      const next = new Set(current)
+      if (next.has(section)) next.delete(section)
+      else next.add(section)
+      return next
+    })
   }
 
   const nextFocusToken = (): number => {
@@ -428,13 +460,13 @@ export function ReadingView({
 
   const createCard = async (selection: PdfSelection): Promise<void> => {
     if (!snapshot.currentProjectId || !selectedDocument) return
-    setPendingCard({ selection, initialComment: '' })
+    setPendingCard({ selection, initialComment: '', sourceReadingNoteId: null })
   }
 
   const createCardFromReadingNote = (note: ReadingNote): void => {
     const selection = selectionFromReadingNote(note)
     if (!selection) return
-    setPendingCard({ selection, initialComment: note.content })
+    setPendingCard({ selection, initialComment: note.content, sourceReadingNoteId: note.id })
   }
 
   const saveCardFromSelection = async (input: {
@@ -460,9 +492,12 @@ export function ReadingView({
           contextAfter: selection.contextAfter,
           comment: input.comment,
           role: input.role,
-          tags: input.tags
+          tags: input.tags,
+          sourceReadingNoteId: pendingCard.sourceReadingNoteId
         }),
-      '研究卡片和对应高亮已创建，并放入“待归类”。'
+      pendingCard.sourceReadingNoteId
+        ? '阅读笔记已转为研究卡片并从笔记列表移除。'
+        : '研究卡片和对应高亮已创建，并放入“待归类”。'
     )
     if (succeeded) setPendingCard(null)
   }
@@ -633,6 +668,8 @@ export function ReadingView({
             onCreateCard={(selection) => void createCard(selection)}
             onCreateAnnotation={(selection, kind) => void createAnnotation(selection, kind)}
             onCreateReadingNote={(selection, kind) => setPendingNote({ selection, kind })}
+            onRequestDeleteAnnotation={setDeletingAnnotation}
+            onCurrentPageChange={setCurrentPdfPage}
             onNotify={notify}
           />
         ) : selectedDocument ? (
@@ -690,214 +727,259 @@ export function ReadingView({
       />
 
       <aside className="reading-inspector">
-        <span className="eyebrow">当前文献</span>
-        <h3>{selectedDocument?.title ?? '尚未选择'}</h3>
-        <p>
-          {selectedDocument?.isRemoved
-            ? selectedDocument.fileAvailable
-              ? '这篇来源已从正常阅读列表移除；因为保留了卡片，管理副本和原文定位仍可使用。'
-              : '这篇来源已从正常阅读列表移除，且 PDF 管理副本缺失；卡片和定位数据仍已保留。'
-            : selectedDocument?.fileAvailable
-            ? '在 PDF 中选择文字即可建立可追溯的研究卡片；高亮和下划线只写入本地数据库。'
-            : selectedDocument?.filePath
-            ? '数据库记录的 PDF 管理副本在本机不可用；研究数据已保留，可重新链接 PDF。'
-            : '这篇文献还没有连接 PDF。'}
-        </p>
         {selectedDocument ? (
-          <div className="document-inspector-actions">
-            <button className="button secondary small" type="button" onClick={() => beginEditDocument(selectedDocument)}>
-              <FilePenLine size={14} /> 编辑书目信息
-            </button>
-            {selectedDocument.fileAvailable ? (
-              <button className="button secondary small" type="button" onClick={() => void revealDocument()}>
-                <FolderOpen size={14} /> 打开所在位置
-              </button>
-            ) : null}
-            {selectedDocument.isRemoved ? (
-              <>
-                <button className="button secondary small" type="button" onClick={() => void restoreDocument(selectedDocument)}>
-                  <RotateCcw size={14} /> 恢复文献
-                </button>
-                <button className="button ghost small danger-text" type="button" onClick={() => setRemovingDocument(selectedDocument)}>
-                  <Trash2 size={14} /> 彻底删除
-                </button>
-              </>
-            ) : (
-              <button className="button ghost small danger-text" type="button" onClick={() => setRemovingDocument(selectedDocument)}>
-                <Trash2 size={14} /> 移除文献
-              </button>
-            )}
-          </div>
-        ) : null}
-        <dl className="inspector-list">
-          <div>
-            <dt>文件状态</dt>
-            <dd>
-              {selectedDocument?.fileAvailable
-                ? '已连接 · 只读副本'
-                : selectedDocument?.filePath
-                ? 'PDF 缺失 · 等待重新链接'
-                : '等待导入'}
-            </dd>
-          </div>
-          {selectedDocument?.filePath ? (
-            <div>
-              <dt>{selectedDocument.fileAvailable ? '管理副本' : '原记录路径'}</dt>
-              <dd title={selectedDocument.filePath}>{selectedDocument.filePath}</dd>
-            </div>
-          ) : null}
-          {selectedDocument?.journal || selectedDocument?.doi ? (
-            <div>
-              <dt>书目来源</dt>
-              <dd title={[selectedDocument.journal, selectedDocument.doi].filter(Boolean).join(' · ')}>
-                {selectedDocument.journal || `DOI ${selectedDocument.doi}`}
-              </dd>
-            </div>
-          ) : null}
-          <div>
-            <dt>研究卡片</dt>
-            <dd>{documentCards.length}</dd>
-          </div>
-          <div>
-            <dt>PDF 批注</dt>
-            <dd>{documentAnnotations.length}</dd>
-          </div>
-          <div>
-            <dt>灵感 / 质疑</dt>
-            <dd>
-              {documentNotes.filter((note) => note.kind === 'insight').length} /{' '}
-              {documentNotes.filter((note) => note.kind === 'critique').length}
-            </dd>
-          </div>
-        </dl>
-
-        {selectedDocument ? (
-          <section className="reading-note-composer">
-            <div className="reading-reference-heading">
-              <span>阅读思考</span>
-              <small>{documentNotes.length}</small>
-            </div>
-            <div className="reading-note-actions">
-              <button type="button" onClick={() => setPendingNote({ kind: 'insight', selection: null })}>
-                <Lightbulb size={14} /> 记一条灵感
-              </button>
-              <button type="button" onClick={() => setPendingNote({ kind: 'critique', selection: null })}>
-                <MessageCircleQuestion size={14} /> 记一条质疑
-              </button>
-            </div>
-            {documentNotes.length > 0 ? (
-              <div className="reading-note-list">
-                {documentNotes.map((note) => (
-                  <article className={`reading-note-item ${note.kind}`} key={note.id}>
-                    <button
-                      className="reading-note-main"
-                      type="button"
-                      disabled={note.pageNumber === null}
-                      title={note.pageNumber === null ? '这条笔记未关联具体原文' : '回到关联原文'}
-                      onClick={() => {
-                        if (note.pageNumber !== null) {
-                          focusDocumentLocation(note.documentId, note.pageNumber, note.locatorJson)
-                        }
-                      }}
-                    >
-                      <span>{note.kind === 'insight' ? <Lightbulb size={13} /> : <MessageCircleQuestion size={13} />}</span>
-                      <span>
-                        <strong>{note.content}</strong>
-                        <small>
-                          {note.kind === 'insight' ? '灵感' : '质疑'}
-                          {note.pageNumber ? ` · PDF ${note.pageNumber} 页` : ' · 文献级笔记'}
-                        </small>
-                      </span>
+          <>
+            <section className={`reading-inspector-section ${collapsedInspectorSections.has('document') ? 'collapsed' : ''}`}>
+              <ReadingInspectorSectionToggle
+                title={selectedDocument.title}
+                eyebrow="当前文献"
+                collapsed={collapsedInspectorSections.has('document')}
+                onToggle={() => toggleInspectorSection('document')}
+              />
+              {!collapsedInspectorSections.has('document') ? (
+                <div className="reading-inspector-section-body">
+                  <p className="reading-inspector-description">
+                    {selectedDocument.isRemoved
+                      ? selectedDocument.fileAvailable
+                        ? '这篇来源已从正常阅读列表移除；管理副本和原文定位仍可使用。'
+                        : '这篇来源已移除且 PDF 缺失；卡片和定位数据仍已保留。'
+                      : selectedDocument.fileAvailable
+                        ? '选择文字可建立卡片；高亮和下划线只写入本地数据库。'
+                        : selectedDocument.filePath
+                          ? 'PDF 管理副本缺失；研究数据已保留，可重新链接。'
+                          : '这篇文献还没有连接 PDF。'}
+                  </p>
+                  <div className="document-inspector-actions">
+                    <button className="button secondary small" type="button" onClick={() => beginEditDocument(selectedDocument)}>
+                      <FilePenLine size={14} /> 编辑书目信息
                     </button>
-                    <div className="reading-note-item-actions">
-                      {selectionFromReadingNote(note) ? (
-                        <button
-                          className="reading-note-convert"
-                          type="button"
-                          title="使用现有制卡流程；转换后保留本笔记"
-                          onClick={() => createCardFromReadingNote(note)}
-                        >
-                          <FilePlus2 size={12} /> 转为卡片
-                        </button>
-                      ) : null}
-                      <button className="annotation-delete" type="button" aria-label="删除阅读笔记" onClick={() => setDeletingNote(note)}>
-                        <Trash2 size={13} />
+                    {selectedDocument.fileAvailable ? (
+                      <button className="button secondary small" type="button" onClick={() => void revealDocument()}>
+                        <FolderOpen size={14} /> 打开所在位置
                       </button>
+                    ) : null}
+                    {selectedDocument.isRemoved ? (
+                      <>
+                        <button className="button secondary small" type="button" onClick={() => void restoreDocument(selectedDocument)}>
+                          <RotateCcw size={14} /> 恢复文献
+                        </button>
+                        <button className="button ghost small danger-text" type="button" onClick={() => setRemovingDocument(selectedDocument)}>
+                          <Trash2 size={14} /> 彻底删除
+                        </button>
+                      </>
+                    ) : (
+                      <button className="button ghost small danger-text" type="button" onClick={() => setRemovingDocument(selectedDocument)}>
+                        <Trash2 size={14} /> 移除文献
+                      </button>
+                    )}
+                  </div>
+                  <dl className="inspector-list">
+                    <div>
+                      <dt>文件状态</dt>
+                      <dd>
+                        {selectedDocument.fileAvailable
+                          ? '已连接 · 只读副本'
+                          : selectedDocument.filePath
+                            ? 'PDF 缺失 · 等待重新链接'
+                            : '等待导入'}
+                      </dd>
                     </div>
-                  </article>
-                ))}
-              </div>
-            ) : null}
-          </section>
-        ) : null}
+                    {selectedDocument.filePath ? (
+                      <div>
+                        <dt>{selectedDocument.fileAvailable ? '管理副本' : '原记录路径'}</dt>
+                        <dd title={selectedDocument.filePath}>{selectedDocument.filePath}</dd>
+                      </div>
+                    ) : null}
+                    {selectedDocument.journal || selectedDocument.doi ? (
+                      <div>
+                        <dt>书目来源</dt>
+                        <dd title={[selectedDocument.journal, selectedDocument.doi].filter(Boolean).join(' · ')}>
+                          {selectedDocument.journal || `DOI ${selectedDocument.doi}`}
+                        </dd>
+                      </div>
+                    ) : null}
+                    <div>
+                      <dt>研究数据</dt>
+                      <dd>{documentCards.length} 卡片 · {documentAnnotations.length} 批注 · {documentNotes.length} 思考</dd>
+                    </div>
+                  </dl>
+                  {selectedDocument.fileAvailable ? (
+                    <div className="boundary-note">
+                      <strong>当前能力边界</strong>
+                      <span>支持文字型 PDF；扫描件 OCR 尚未接入。</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
 
-        {selectedDocument?.filePath && documentCards.length > 0 ? (
-          <section className="reading-reference-list">
-            <div className="reading-reference-heading">
-              <span>本篇卡片</span>
-              <small>{documentCards.length}</small>
-            </div>
-            <div className="reading-reference-items">
-              {documentCards.map((card) => (
-                <button
-                  type="button"
-                  className="reading-reference-item"
-                  key={card.id}
-                  onClick={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
-                >
-                  <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
-                  <span>
-                    <strong>{card.displayText}</strong>
-                    <small>{card.comment || '点击回到原文位置'}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </section>
-        ) : null}
+            <section className={`reading-inspector-section ${collapsedInspectorSections.has('notes') ? 'collapsed' : ''}`}>
+              <ReadingInspectorSectionToggle
+                title="阅读思考"
+                count={documentNotes.length}
+                collapsed={collapsedInspectorSections.has('notes')}
+                onToggle={() => toggleInspectorSection('notes')}
+              />
+              {!collapsedInspectorSections.has('notes') ? (
+                <div className="reading-inspector-section-body">
+                  <div className="reading-note-actions">
+                    <button type="button" onClick={() => setPendingNote({ kind: 'insight', selection: null })}>
+                      <Lightbulb size={14} /> 记一条灵感
+                    </button>
+                    <button type="button" onClick={() => setPendingNote({ kind: 'critique', selection: null })}>
+                      <MessageCircleQuestion size={14} /> 记一条质疑
+                    </button>
+                  </div>
+                  {documentNotes.length > 0 ? (
+                    <div className="reading-note-list">
+                      {documentNotes.map((note) => (
+                        <article className={`reading-note-item ${note.kind}`} key={note.id}>
+                          <button
+                            className="reading-note-main"
+                            type="button"
+                            disabled={note.pageNumber === null}
+                            title={note.pageNumber === null ? '这条笔记未关联具体原文' : '回到关联原文'}
+                            onClick={() => {
+                              if (note.pageNumber !== null) {
+                                focusDocumentLocation(note.documentId, note.pageNumber, note.locatorJson)
+                              }
+                            }}
+                          >
+                            <span>{note.kind === 'insight' ? <Lightbulb size={13} /> : <MessageCircleQuestion size={13} />}</span>
+                            <span>
+                              <strong>{note.content}</strong>
+                              <small>
+                                {note.kind === 'insight' ? '灵感' : '质疑'}
+                                {note.pageNumber ? ` · PDF ${note.pageNumber} 页` : ' · 文献级笔记'}
+                              </small>
+                            </span>
+                          </button>
+                          <div className="reading-note-item-actions">
+                            {selectionFromReadingNote(note) ? (
+                              <button
+                                className="reading-note-convert"
+                                type="button"
+                                title="使用现有制卡流程；转换成功后移除本笔记"
+                                onClick={() => createCardFromReadingNote(note)}
+                              >
+                                <FilePlus2 size={12} /> 转为卡片
+                              </button>
+                            ) : null}
+                            <button className="annotation-delete" type="button" aria-label="删除阅读笔记" onClick={() => setDeletingNote(note)}>
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="reading-inspector-empty">还没有灵感或质疑。</p>
+                  )}
+                </div>
+              ) : null}
+            </section>
 
-        {selectedDocument?.filePath && documentAnnotations.length > 0 ? (
-          <section className="reading-reference-list annotation-reference-list">
-            <div className="reading-reference-heading">
-              <span>本篇批注</span>
-              <small>{documentAnnotations.length}</small>
-            </div>
-            <div className="reading-reference-items">
-              {documentAnnotations.map((annotation) => (
-                <article className="reading-annotation-item" key={annotation.id}>
-                  <button
-                    type="button"
-                    onClick={() => focusDocumentLocation(annotation.documentId, annotation.pageNumber, annotation.locatorJson)}
-                  >
-                    <span className={`annotation-kind ${annotation.kind}`}>
-                      {annotation.kind === 'highlight' ? <Highlighter size={13} /> : <Underline size={13} />}
-                    </span>
-                    <span>
-                      <strong>{annotation.selectedText || '未记录文字'}</strong>
-                      <small>第 {annotation.pageNumber} 页 · 点击定位</small>
-                    </span>
-                  </button>
-                  <button
-                    className="annotation-delete"
-                    type="button"
-                    aria-label="删除批注"
-                    title="删除批注"
-                    onClick={() => setDeletingAnnotation(annotation)}
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </article>
-              ))}
-            </div>
-          </section>
-        ) : null}
+            <section className={`reading-inspector-section ${collapsedInspectorSections.has('cards') ? 'collapsed' : ''}`}>
+              <ReadingInspectorSectionToggle
+                title="本篇卡片"
+                count={documentCards.length}
+                collapsed={collapsedInspectorSections.has('cards')}
+                onToggle={() => toggleInspectorSection('cards')}
+              />
+              {!collapsedInspectorSections.has('cards') ? (
+                <div className="reading-inspector-section-body">
+                  {documentCards.length > 0 ? (
+                    <div className="reading-reference-items">
+                      {cardPagePartition.currentPageItems.length > 0 ? (
+                        <div className="reading-page-group-label current">当前第 {currentPdfPage} 页</div>
+                      ) : null}
+                      {cardPagePartition.currentPageItems.map((card) => (
+                        <button
+                          type="button"
+                          className="reading-reference-item current-page"
+                          key={card.id}
+                          onClick={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
+                        >
+                          <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
+                          <span>
+                            <strong>{card.displayText}</strong>
+                            <small>当前页 · {card.comment || '点击回到原文位置'}</small>
+                          </span>
+                        </button>
+                      ))}
+                      {cardPagePartition.otherPageItems.length > 0 ? (
+                        <div className="reading-page-group-label">其他页</div>
+                      ) : null}
+                      {cardPagePartition.otherPageItems.map((card) => (
+                        <button
+                          type="button"
+                          className="reading-reference-item"
+                          key={card.id}
+                          onClick={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
+                        >
+                          <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
+                          <span>
+                            <strong>{card.displayText}</strong>
+                            <small>{card.comment || '点击回到原文位置'}</small>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="reading-inspector-empty">这篇文献还没有卡片。</p>
+                  )}
+                </div>
+              ) : null}
+            </section>
 
-        {selectedDocument?.fileAvailable ? (
-          <div className="boundary-note">
-            <strong>当前能力边界</strong>
-            <span>支持文字型 PDF 的渲染、选择、高亮、下划线和定位。扫描件目前只显示页面，OCR 将在后续阶段接入。</span>
+            <section className={`reading-inspector-section ${collapsedInspectorSections.has('annotations') ? 'collapsed' : ''}`}>
+              <ReadingInspectorSectionToggle
+                title="本篇批注"
+                count={documentAnnotations.length}
+                collapsed={collapsedInspectorSections.has('annotations')}
+                onToggle={() => toggleInspectorSection('annotations')}
+              />
+              {!collapsedInspectorSections.has('annotations') ? (
+                <div className="reading-inspector-section-body">
+                  {documentAnnotations.length > 0 ? (
+                    <div className="reading-reference-items">
+                      {annotationPagePartition.currentPageItems.length > 0 ? (
+                        <div className="reading-page-group-label current">当前第 {currentPdfPage} 页</div>
+                      ) : null}
+                      {annotationPagePartition.currentPageItems.map((annotation) => (
+                        <ReadingAnnotationItem
+                          key={annotation.id}
+                          annotation={annotation}
+                          currentPage
+                          onLocate={focusDocumentLocation}
+                          onDelete={setDeletingAnnotation}
+                        />
+                      ))}
+                      {annotationPagePartition.otherPageItems.length > 0 ? (
+                        <div className="reading-page-group-label">其他页</div>
+                      ) : null}
+                      {annotationPagePartition.otherPageItems.map((annotation) => (
+                        <ReadingAnnotationItem
+                          key={annotation.id}
+                          annotation={annotation}
+                          onLocate={focusDocumentLocation}
+                          onDelete={setDeletingAnnotation}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="reading-inspector-empty">这篇文献还没有高亮或下划线。</p>
+                  )}
+                </div>
+              ) : null}
+            </section>
+          </>
+        ) : (
+          <div className="reading-inspector-empty-document">
+            <span className="eyebrow">当前文献</span>
+            <strong>尚未选择文献</strong>
           </div>
-        ) : null}
+        )}
       </aside>
 
       {showDocumentDialog ? (
@@ -1008,6 +1090,80 @@ export function ReadingView({
         />
       ) : null}
     </div>
+  )
+}
+
+interface ReadingInspectorSectionToggleProps {
+  title: string
+  eyebrow?: string
+  count?: number
+  collapsed: boolean
+  onToggle: () => void
+}
+
+function ReadingInspectorSectionToggle({
+  title,
+  eyebrow,
+  count,
+  collapsed,
+  onToggle
+}: ReadingInspectorSectionToggleProps): React.JSX.Element {
+  return (
+    <button
+      className="reading-inspector-section-toggle"
+      type="button"
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+    >
+      <span>
+        {eyebrow ? <small className="eyebrow">{eyebrow}</small> : null}
+        <strong>{title}</strong>
+      </span>
+      {count !== undefined ? <small className="reading-inspector-section-count">{count}</small> : null}
+      {collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+    </button>
+  )
+}
+
+interface ReadingAnnotationItemProps {
+  annotation: PdfAnnotation
+  currentPage?: boolean
+  onLocate: (documentId: string, page: number | null, locatorJson: string) => void
+  onDelete: (annotation: PdfAnnotation) => void
+}
+
+function ReadingAnnotationItem({
+  annotation,
+  currentPage = false,
+  onLocate,
+  onDelete
+}: ReadingAnnotationItemProps): React.JSX.Element {
+  return (
+    <article className={`reading-annotation-item ${currentPage ? 'current-page' : ''}`}>
+      <button
+        type="button"
+        onClick={() => onLocate(annotation.documentId, annotation.pageNumber, annotation.locatorJson)}
+      >
+        <span className={`annotation-kind ${annotation.kind}`}>
+          {annotation.kind === 'highlight' ? <Highlighter size={13} /> : <Underline size={13} />}
+        </span>
+        <span>
+          <strong>{annotation.selectedText || '未记录文字'}</strong>
+          <small>
+            {currentPage ? '当前页 · ' : ''}第 {annotation.pageNumber} 页 · 点击定位
+          </small>
+        </span>
+      </button>
+      <button
+        className="annotation-delete"
+        type="button"
+        aria-label="删除批注"
+        title="删除批注"
+        onClick={() => onDelete(annotation)}
+      >
+        <Trash2 size={13} />
+      </button>
+    </article>
   )
 }
 

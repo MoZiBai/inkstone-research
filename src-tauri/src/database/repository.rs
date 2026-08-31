@@ -859,6 +859,31 @@ impl Repository {
         )?;
         let now = timestamp();
         let transaction = self.connection.transaction()?;
+        if let Some(note_id) = input.source_reading_note_id.as_deref() {
+            let matches_source: i64 = transaction.query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1 FROM reading_notes
+                  WHERE id = ?1 AND project_id = ?2 AND document_id = ?3
+                    AND selected_text = ?4 AND page_number = ?5 AND locator_json = ?6
+                )
+                "#,
+                params![
+                    note_id,
+                    input.project_id,
+                    input.document_id,
+                    input.raw_text,
+                    input.pdf_page,
+                    input.locator_json
+                ],
+                |row| row.get(0),
+            )?;
+            if matches_source == 0 {
+                return Err(AppError::Validation(
+                    "待转换的阅读笔记与当前 PDF 原文位置不匹配。".into(),
+                ));
+            }
+        }
         let excerpt_id = transaction
             .query_row(
                 r#"
@@ -916,6 +941,10 @@ impl Repository {
             &input.locator_json,
             &now,
         )?;
+
+        if let Some(note_id) = input.source_reading_note_id.as_deref() {
+            transaction.execute("DELETE FROM reading_notes WHERE id = ?1", params![note_id])?;
+        }
 
         if let Some(existing_card_id) = transaction
             .query_row(
@@ -2365,6 +2394,65 @@ mod tests {
     }
 
     #[test]
+    fn converting_a_linked_reading_note_creates_a_card_and_consumes_the_note_atomically() {
+        let mut repository = Repository::memory().expect("memory database");
+        repository
+            .connection
+            .execute(
+                "UPDATE documents SET file_path = 'managed.pdf', file_hash = 'hash' WHERE id = 'seed-document-space'",
+                [],
+            )
+            .expect("attach test PDF metadata");
+        let locator_json = r#"{"version":1,"page":9,"coordinateSpace":"page-normalized","rects":[{"x":0.12,"y":0.24,"width":0.38,"height":0.04}]}"#;
+        let note_id = repository
+            .create_reading_note(CreateReadingNoteInput {
+                project_id: "seed-project-tombs".into(),
+                document_id: "seed-document-space".into(),
+                kind: "critique".into(),
+                content: "这条质疑应成为卡片评论。".into(),
+                selected_text: "一段尚未制卡的原文".into(),
+                page_number: Some(9),
+                locator_json: locator_json.into(),
+            })
+            .expect("create linked note");
+
+        let card_id = repository
+            .create_card_from_selection(CreateCardFromSelectionInput {
+                project_id: "seed-project-tombs".into(),
+                document_id: "seed-document-space".into(),
+                raw_text: "一段尚未制卡的原文".into(),
+                display_text: "一段经人工校正的原文".into(),
+                pdf_page: 9,
+                print_page: None,
+                locator_json: locator_json.into(),
+                context_before: String::new(),
+                context_after: String::new(),
+                comment: "这条质疑应成为卡片评论。".into(),
+                role: "oppose".into(),
+                tags: vec!["质疑".into()],
+                source_reading_note_id: Some(note_id.clone()),
+            })
+            .expect("convert note to card");
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after conversion");
+        assert!(!snapshot.reading_notes.iter().any(|note| note.id == note_id));
+        let card = snapshot
+            .cards
+            .iter()
+            .find(|card| card.id == card_id)
+            .expect("converted card");
+        assert_eq!(card.display_text, "一段经人工校正的原文");
+        assert_eq!(card.comment, "这条质疑应成为卡片评论。");
+        assert!(snapshot.pdf_annotations.iter().any(|annotation| {
+            annotation.document_id == "seed-document-space"
+                && annotation.page_number == 9
+                && annotation.locator_json == locator_json
+        }));
+    }
+
+    #[test]
     fn removing_one_outline_link_keeps_other_links_and_card() {
         let mut repository = Repository::memory().expect("memory database");
         let second_link = repository
@@ -2686,6 +2774,7 @@ mod tests {
                     comment: "用于验证重启后仍可回到原文。".into(),
                     role: "support".into(),
                     tags: vec!["PDF".into(), "定位".into()],
+                    source_reading_note_id: None,
                 })
                 .expect("create card from selection");
             let annotation_id: String = repository
