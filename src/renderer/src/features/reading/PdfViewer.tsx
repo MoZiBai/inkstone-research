@@ -119,6 +119,17 @@ export function PdfViewer({
   }, [])
 
   useEffect(() => {
+    if (!selection || !toolbarPosition) return undefined
+    const dismissOnOutsidePointerDown = (event: PointerEvent): void => {
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest('.pdf-selection-toolbar')) return
+      clearSelection()
+    }
+    window.addEventListener('pointerdown', dismissOnOutsidePointerDown, true)
+    return () => window.removeEventListener('pointerdown', dismissOnOutsidePointerDown, true)
+  }, [clearSelection, selection, toolbarPosition])
+
+  useEffect(() => {
     let cancelled = false
     let loadingTask: PDFDocumentLoadingTask | null = null
     let loadedPdf: PDFDocumentProxy | null = null
