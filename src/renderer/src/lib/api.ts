@@ -3,6 +3,7 @@ import type {
   CreateCategoryInput,
   CreateCardFromSelectionInput,
   CreateDocumentInput,
+  CreateDocumentGroupInput,
   CreateOutlineNodeInput,
   CreatePdfAnnotationInput,
   CreateProjectInput,
@@ -17,10 +18,12 @@ import type {
   ImportPdfResult,
   InkstoneApi,
   MoveOutlineNodeInput,
+  MoveDocumentToGroupInput,
   RemoveDocumentInput,
   UpdateCardInput,
   UpdateCategoryInput,
   UpdateDocumentInput,
+  UpdateDocumentGroupInput,
   UpdateOutlineCardLinkInput,
   UpdateOutlineNodeInput,
   UpdatePdfAnnotationInput,
@@ -50,6 +53,14 @@ export const api: InkstoneApi = {
     invoke<void>('remove_document', { input }),
   restoreDocument: (projectId: string, documentId: string) =>
     invoke<void>('restore_document', { projectId, documentId }),
+  createDocumentGroup: (input: CreateDocumentGroupInput) =>
+    invoke<string>('create_document_group', { input }),
+  updateDocumentGroup: (input: UpdateDocumentGroupInput) =>
+    invoke<void>('update_document_group', { input }),
+  deleteDocumentGroup: (groupId: string) =>
+    invoke<void>('delete_document_group', { groupId }),
+  moveDocumentToGroup: (input: MoveDocumentToGroupInput) =>
+    invoke<void>('move_document_to_group', { input }),
   importPdf: (input: ImportPdfInput) =>
     invoke<ImportPdfResult>('import_pdf', { input }),
   exportDatabase: (destinationPath: string) =>

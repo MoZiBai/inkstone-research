@@ -12,13 +12,14 @@ use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     BackupCleanupResult, BackupManagerState, BackupSettings, BatchUpdateCardsInput,
-    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
-    DatabaseImportPreview, DatabaseImportResult, ImportPdfInput, ImportPdfResult,
-    MoveOutlineNodeInput, RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput,
-    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
-    UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
-    WorkspaceSnapshot,
+    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentGroupInput,
+    CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput, CreateProjectInput,
+    CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview, DatabaseImportResult,
+    ImportPdfInput, ImportPdfResult, MoveDocumentToGroupInput, MoveOutlineNodeInput,
+    RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput, UpdateCategoryInput,
+    UpdateDocumentGroupInput, UpdateDocumentInput, UpdateOutlineCardLinkInput,
+    UpdateOutlineNodeInput, UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput,
+    UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -246,6 +247,35 @@ pub fn restore_document(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     state.lock()?.restore_document(&project_id, &document_id)
+}
+
+#[tauri::command]
+pub fn create_document_group(
+    input: CreateDocumentGroupInput,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    state.lock()?.create_document_group(input)
+}
+
+#[tauri::command]
+pub fn update_document_group(
+    input: UpdateDocumentGroupInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_document_group(input)
+}
+
+#[tauri::command]
+pub fn delete_document_group(group_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state.lock()?.delete_document_group(&group_id)
+}
+
+#[tauri::command]
+pub fn move_document_to_group(
+    input: MoveDocumentToGroupInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.move_document_to_group(input)
 }
 
 #[tauri::command]

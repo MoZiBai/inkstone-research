@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -324,6 +324,33 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+
+    if current_version < 9 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS document_groups (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              parent_id TEXT REFERENCES document_groups(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            ALTER TABLE project_documents ADD COLUMN group_id TEXT
+              REFERENCES document_groups(id) ON DELETE SET NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_document_groups_tree
+              ON document_groups(project_id, parent_id, sort_order);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_document_groups_unique_sibling_name
+              ON document_groups(project_id, IFNULL(parent_id, ''), name);
+            CREATE INDEX IF NOT EXISTS idx_project_documents_group
+              ON project_documents(project_id, group_id, sort_order);
+            "#,
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -572,6 +599,14 @@ mod tests {
                   role TEXT NOT NULL,
                   created_at TEXT NOT NULL
                 );
+                CREATE TABLE project_documents (
+                  project_id TEXT NOT NULL,
+                  document_id TEXT NOT NULL,
+                  sort_order INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  removed_at TEXT,
+                  PRIMARY KEY (project_id, document_id)
+                );
                 INSERT INTO projects VALUES ('project-old', '2025-01-01', '2025-01-02');
                 INSERT INTO project_cards VALUES ('card-support', 'project-old', 'support', '2025-01-03');
                 INSERT INTO project_cards VALUES ('card-unset', 'project-old', 'unset', '2025-01-04');
@@ -633,6 +668,9 @@ mod tests {
         connection
             .execute_batch(
                 r#"
+                DROP INDEX idx_project_documents_group;
+                ALTER TABLE project_documents DROP COLUMN group_id;
+                DROP TABLE document_groups;
                 DROP TABLE backup_records;
                 PRAGMA user_version = 7;
                 "#,
@@ -653,5 +691,44 @@ mod tests {
             .expect("backup registry table");
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(table_exists, 1);
+    }
+
+    #[test]
+    fn version_eight_database_adds_hierarchical_document_groups() {
+        let mut connection = Connection::open_in_memory().expect("memory database");
+        migrate_database(&mut connection).expect("create current schema");
+        connection
+            .execute_batch(
+                r#"
+                DROP INDEX idx_project_documents_group;
+                ALTER TABLE project_documents DROP COLUMN group_id;
+                DROP TABLE document_groups;
+                PRAGMA user_version = 8;
+                "#,
+            )
+            .expect("version eight fixture");
+
+        migrate_database(&mut connection).expect("migrate version eight database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let group_table_exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'document_groups')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("document groups table");
+        let group_column_exists: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_documents') WHERE name = 'group_id')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("project document group column");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(group_table_exists, 1);
+        assert_eq!(group_column_exists, 1);
     }
 }

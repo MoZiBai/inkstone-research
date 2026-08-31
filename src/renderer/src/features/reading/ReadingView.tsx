@@ -7,7 +7,10 @@ import {
   FilePlus2,
   FilePenLine,
   FileText,
+  FolderInput,
   FolderOpen,
+  FolderPlus,
+  FolderTree,
   Highlighter,
   Library,
   Lightbulb,
@@ -25,6 +28,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BibliographicMetadataInput,
+  DocumentGroup,
   DocumentSummary,
   ImportPdfResult,
   PdfAnnotation,
@@ -55,6 +59,13 @@ import {
 import { titleAfterPdfSelection } from './pdfImportDraft'
 import { parsePdfLocator, type PdfSelection } from './pdfLocator'
 import { partitionItemsByPage } from './readingPageItems'
+import {
+  buildDocumentGroupTree,
+  countDocumentsInGroup,
+  descendantDocumentGroupIds,
+  flattenDocumentGroups,
+  type DocumentGroupTreeNode
+} from './documentGroups'
 import { selectionFromReadingNote } from './readingNoteCardDraft'
 import {
   adjustReadingPanel,
@@ -118,6 +129,7 @@ const EMPTY_METADATA: MetadataDraft = {
 }
 
 const READING_PANEL_STORAGE_KEY = 'inkstone:reading-panel-widths:v1'
+const UNCLASSIFIED_GROUP_KEY = '__unclassified__'
 type ReadingInspectorSection = 'document' | 'notes' | 'cards' | 'annotations'
 
 export function ReadingView({
@@ -170,6 +182,20 @@ export function ReadingView({
     y: number
     document: DocumentSummary
   } | null>(null)
+  const [documentGroupContextMenu, setDocumentGroupContextMenu] = useState<{
+    x: number
+    y: number
+    group: DocumentGroup
+  } | null>(null)
+  const [collapsedDocumentGroupIds, setCollapsedDocumentGroupIds] = useState<Set<string>>(
+    () => new Set()
+  )
+  const [editingDocumentGroup, setEditingDocumentGroup] = useState<{
+    group: DocumentGroup | null
+    parentId: string | null
+  } | null>(null)
+  const [deletingDocumentGroup, setDeletingDocumentGroup] = useState<DocumentGroup | null>(null)
+  const [assigningDocument, setAssigningDocument] = useState<DocumentSummary | null>(null)
   const deferredDocumentQuery = useDeferredValue(documentQuery)
   const focusCounter = useRef(0)
   const readingLayoutRef = useRef<HTMLDivElement>(null)
@@ -177,6 +203,10 @@ export function ReadingView({
   const selectedDocument = useMemo(
     () => snapshot.documents.find((document) => document.id === selectedDocumentId) ?? null,
     [selectedDocumentId, snapshot.documents]
+  )
+  const selectedDocumentGroup = useMemo(
+    () => snapshot.documentGroups.find((group) => group.id === selectedDocument?.groupId) ?? null,
+    [selectedDocument?.groupId, snapshot.documentGroups]
   )
   const documentCards = useMemo(
     () => snapshot.cards.filter((card) => card.documentId === selectedDocument?.id),
@@ -219,6 +249,19 @@ export function ReadingView({
       documentSort
     ),
     [deferredDocumentQuery, documentFilter, documentSort, snapshot.documents]
+  )
+  const documentGroupingIsFiltered = Boolean(deferredDocumentQuery) || documentFilter !== 'all'
+  const documentGroupTree = useMemo(
+    () => buildDocumentGroupTree(
+      snapshot.documentGroups,
+      activeDocuments,
+      !documentGroupingIsFiltered
+    ),
+    [activeDocuments, documentGroupingIsFiltered, snapshot.documentGroups]
+  )
+  const flatDocumentGroups = useMemo(
+    () => flattenDocumentGroups(buildDocumentGroupTree(snapshot.documentGroups, []).roots),
+    [snapshot.documentGroups]
   )
 
   useEffect(() => {
@@ -312,6 +355,59 @@ export function ReadingView({
       else next.add(section)
       return next
     })
+  }
+
+  const toggleDocumentGroup = (groupId: string): void => {
+    setCollapsedDocumentGroupIds((current) => {
+      const next = new Set(current)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
+  }
+
+  const saveDocumentGroup = async (name: string, parentId: string | null): Promise<void> => {
+    if (!snapshot.currentProjectId || !editingDocumentGroup) return
+    const succeeded = editingDocumentGroup.group
+      ? await runMutation(
+          () => api.updateDocumentGroup({
+            groupId: editingDocumentGroup.group?.id as string,
+            parentId,
+            name
+          }),
+          '文献分类已更新。'
+        )
+      : await runMutation(
+          () => api.createDocumentGroup({
+            projectId: snapshot.currentProjectId as string,
+            parentId,
+            name
+          }),
+          '文献分类已创建。'
+        )
+    if (succeeded) setEditingDocumentGroup(null)
+  }
+
+  const deleteSelectedDocumentGroup = async (): Promise<void> => {
+    if (!deletingDocumentGroup) return
+    const succeeded = await runMutation(
+      () => api.deleteDocumentGroup(deletingDocumentGroup.id),
+      '文献分类已移除；分类内文献已回到“未分类”。'
+    )
+    if (succeeded) setDeletingDocumentGroup(null)
+  }
+
+  const assignDocumentGroup = async (groupId: string | null): Promise<void> => {
+    if (!assigningDocument || !snapshot.currentProjectId) return
+    const succeeded = await runMutation(
+      () => api.moveDocumentToGroup({
+        projectId: snapshot.currentProjectId as string,
+        documentId: assigningDocument.id,
+        groupId
+      }),
+      groupId ? '文献分类已更新。' : '文献已移到“未分类”。'
+    )
+    if (succeeded) setAssigningDocument(null)
   }
 
   const nextFocusToken = (): number => {
@@ -648,6 +744,34 @@ export function ReadingView({
     if (succeeded) setEditingAnnotation(null)
   }
 
+  const renderDocumentItem = (document: DocumentSummary): React.JSX.Element => (
+    <button
+      className={`document-item ${selectedDocument?.id === document.id ? 'active' : ''}`}
+      type="button"
+      key={document.id}
+      onClick={() => setSelectedDocumentId(document.id)}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setDocumentContextMenu({ x: event.clientX, y: event.clientY, document })
+      }}
+    >
+      <span className="document-symbol">
+        <BookOpen size={15} />
+      </span>
+      <span className="document-copy">
+        <strong>{document.title}</strong>
+        <small>
+          {document.authors || '未知作者'}
+          {document.year ? ` · ${document.year}` : ''}
+        </small>
+        <em>
+          {document.fileAvailable ? 'PDF 可用' : document.filePath ? 'PDF 缺失' : '尚未连接 PDF'} · {document.cardCount} 张卡片
+        </em>
+      </span>
+    </button>
+  )
+
   return (
     <div
       className={`reading-layout ${resizingPanel ? 'resizing' : ''} ${documentRailCollapsed ? 'document-rail-collapsed' : ''}`}
@@ -674,6 +798,15 @@ export function ReadingView({
               title={documentRailCollapsed ? '展开项目文献' : '收起项目文献'}
             >
               {documentRailCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setEditingDocumentGroup({ group: null, parentId: null })}
+              aria-label="新建文献分类"
+              title="新建文献分类"
+            >
+              <FolderPlus size={15} />
             </button>
             <button
               className="icon-button warm"
@@ -731,33 +864,44 @@ export function ReadingView({
           </div>
         </div>
         <div className="document-list">
-          {activeDocuments.map((document) => (
-            <button
-              className={`document-item ${selectedDocument?.id === document.id ? 'active' : ''}`}
-              type="button"
-              key={document.id}
-              onClick={() => setSelectedDocumentId(document.id)}
-              onContextMenu={(event) => {
+          {documentGroupTree.roots.map((node) => (
+            <DocumentGroupBranch
+              key={node.group.id}
+              node={node}
+              depth={0}
+              forceExpanded={documentGroupingIsFiltered}
+              collapsedIds={collapsedDocumentGroupIds}
+              onToggle={toggleDocumentGroup}
+              onContextMenu={(event, group) => {
                 event.preventDefault()
                 event.stopPropagation()
-                setDocumentContextMenu({ x: event.clientX, y: event.clientY, document })
+                setDocumentGroupContextMenu({ x: event.clientX, y: event.clientY, group })
               }}
-            >
-              <span className="document-symbol">
-                <BookOpen size={15} />
-              </span>
-              <span className="document-copy">
-                <strong>{document.title}</strong>
-                <small>
-                  {document.authors || '未知作者'}
-                  {document.year ? ` · ${document.year}` : ''}
-                </small>
-                <em>
-                  {document.fileAvailable ? 'PDF 可用' : document.filePath ? 'PDF 缺失' : '尚未连接 PDF'} · {document.cardCount} 张卡片
-                </em>
-              </span>
-            </button>
+              renderDocument={renderDocumentItem}
+            />
           ))}
+          {documentGroupTree.unclassified.length > 0 ? (
+            <section className="document-group-branch unclassified">
+              <button
+                className="document-group-row"
+                type="button"
+                aria-expanded={documentGroupingIsFiltered || !collapsedDocumentGroupIds.has(UNCLASSIFIED_GROUP_KEY)}
+                onClick={() => toggleDocumentGroup(UNCLASSIFIED_GROUP_KEY)}
+              >
+                {documentGroupingIsFiltered || !collapsedDocumentGroupIds.has(UNCLASSIFIED_GROUP_KEY)
+                  ? <ChevronDown size={14} />
+                  : <ChevronRight size={14} />}
+                <FolderTree size={14} />
+                <span>未分类</span>
+                <small>{documentGroupTree.unclassified.length}</small>
+              </button>
+              {documentGroupingIsFiltered || !collapsedDocumentGroupIds.has(UNCLASSIFIED_GROUP_KEY) ? (
+                <div className="document-group-contents">
+                  {documentGroupTree.unclassified.map(renderDocumentItem)}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
           {allActiveDocuments.length === 0 ? (
             <EmptyState
               icon={Library}
@@ -922,6 +1066,9 @@ export function ReadingView({
                   <div className="document-inspector-actions">
                     <button className="button secondary small" type="button" onClick={() => beginEditDocument(selectedDocument)}>
                       <FilePenLine size={14} /> 编辑书目信息
+                    </button>
+                    <button className="button secondary small" type="button" onClick={() => setAssigningDocument(selectedDocument)}>
+                      <FolderInput size={14} /> {selectedDocumentGroup?.name ?? '未分类'}
                     </button>
                     {selectedDocument.fileAvailable ? (
                       <button className="button secondary small" type="button" onClick={() => void revealDocument()}>
@@ -1190,6 +1337,12 @@ export function ReadingView({
               onSelect: () => void revealDocument(documentContextMenu.document)
             },
             {
+              id: 'group',
+              label: '调整文献分类…',
+              icon: <FolderInput size={14} />,
+              onSelect: () => setAssigningDocument(documentContextMenu.document)
+            },
+            {
               id: 'remove',
               label: documentContextMenu.document.isRemoved ? '彻底删除文献' : '移除文献',
               icon: <Trash2 size={14} />,
@@ -1198,6 +1351,72 @@ export function ReadingView({
               onSelect: () => setRemovingDocument(documentContextMenu.document)
             }
           ]}
+        />
+      ) : null}
+
+      {documentGroupContextMenu ? (
+        <ContextMenu
+          x={documentGroupContextMenu.x}
+          y={documentGroupContextMenu.y}
+          ariaLabel={`文献分类“${documentGroupContextMenu.group.name}”操作`}
+          onClose={() => setDocumentGroupContextMenu(null)}
+          items={[
+            {
+              id: 'subgroup',
+              label: '新建下级分类',
+              icon: <FolderPlus size={14} />,
+              onSelect: () => setEditingDocumentGroup({ group: null, parentId: documentGroupContextMenu.group.id })
+            },
+            {
+              id: 'edit',
+              label: '重命名或调整层级',
+              icon: <FilePenLine size={14} />,
+              onSelect: () => setEditingDocumentGroup({
+                group: documentGroupContextMenu.group,
+                parentId: documentGroupContextMenu.group.parentId
+              })
+            },
+            {
+              id: 'delete',
+              label: '移除分类（保留文献）',
+              icon: <Trash2 size={14} />,
+              danger: true,
+              separatorBefore: true,
+              onSelect: () => setDeletingDocumentGroup(documentGroupContextMenu.group)
+            }
+          ]}
+        />
+      ) : null}
+
+      {editingDocumentGroup ? (
+        <DocumentGroupDialog
+          groups={flatDocumentGroups}
+          excludedGroupIds={editingDocumentGroup.group
+            ? descendantDocumentGroupIds(snapshot.documentGroups, editingDocumentGroup.group.id)
+            : new Set()}
+          group={editingDocumentGroup.group}
+          initialParentId={editingDocumentGroup.parentId}
+          onSave={saveDocumentGroup}
+          onClose={() => setEditingDocumentGroup(null)}
+        />
+      ) : null}
+
+      {assigningDocument ? (
+        <DocumentGroupAssignmentDialog
+          document={assigningDocument}
+          groups={flatDocumentGroups}
+          onSave={assignDocumentGroup}
+          onClose={() => setAssigningDocument(null)}
+        />
+      ) : null}
+
+      {deletingDocumentGroup ? (
+        <ConfirmDialog
+          title={`移除文献分类“${deletingDocumentGroup.name}”？`}
+          description="该分类及其下级分类会被移除，其中的文献将回到“未分类”。PDF、卡片、批注、二次整理和论文提纲都不会删除。"
+          confirmLabel="移除分类，保留文献"
+          onConfirm={() => void deleteSelectedDocumentGroup()}
+          onCancel={() => setDeletingDocumentGroup(null)}
         />
       ) : null}
 
@@ -1336,6 +1555,173 @@ export function ReadingView({
         />
       ) : null}
     </div>
+  )
+}
+
+interface DocumentGroupBranchProps {
+  node: DocumentGroupTreeNode
+  depth: number
+  forceExpanded: boolean
+  collapsedIds: ReadonlySet<string>
+  onToggle: (groupId: string) => void
+  onContextMenu: (event: React.MouseEvent, group: DocumentGroup) => void
+  renderDocument: (document: DocumentSummary) => React.JSX.Element
+}
+
+function DocumentGroupBranch({
+  node,
+  depth,
+  forceExpanded,
+  collapsedIds,
+  onToggle,
+  onContextMenu,
+  renderDocument
+}: DocumentGroupBranchProps): React.JSX.Element {
+  const expanded = forceExpanded || !collapsedIds.has(node.group.id)
+  return (
+    <section
+      className="document-group-branch"
+      style={{ '--document-group-depth': depth } as React.CSSProperties}
+    >
+      <button
+        className="document-group-row"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => onToggle(node.group.id)}
+        onContextMenu={(event) => onContextMenu(event, node.group)}
+      >
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <FolderTree size={14} />
+        <span>{node.group.name}</span>
+        <small>{countDocumentsInGroup(node)}</small>
+      </button>
+      {expanded ? (
+        <div className="document-group-contents">
+          {node.documents.map(renderDocument)}
+          {node.children.map((child) => (
+            <DocumentGroupBranch
+              key={child.group.id}
+              node={child}
+              depth={depth + 1}
+              forceExpanded={forceExpanded}
+              collapsedIds={collapsedIds}
+              onToggle={onToggle}
+              onContextMenu={onContextMenu}
+              renderDocument={renderDocument}
+            />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+interface DocumentGroupDialogProps {
+  groups: Array<{ group: DocumentGroup; depth: number }>
+  excludedGroupIds: ReadonlySet<string>
+  group: DocumentGroup | null
+  initialParentId: string | null
+  onSave: (name: string, parentId: string | null) => Promise<void>
+  onClose: () => void
+}
+
+function DocumentGroupDialog({
+  groups,
+  excludedGroupIds,
+  group,
+  initialParentId,
+  onSave,
+  onClose
+}: DocumentGroupDialogProps): React.JSX.Element {
+  const [name, setName] = useState(group?.name ?? '')
+  const [parentId, setParentId] = useState(initialParentId ?? '')
+  const [saving, setSaving] = useState(false)
+  const availableParents = groups.filter((entry) =>
+    entry.group.id !== group?.id && !excludedGroupIds.has(entry.group.id)
+  )
+  return (
+    <Modal
+      title={group ? '编辑文献分类' : initialParentId ? '新建下级文献分类' : '新建文献分类'}
+      subtitle="分类只组织当前项目中的文献，不复制 PDF，也不改变卡片来源。"
+      onClose={onClose}
+      hasUnsavedChanges={name !== (group?.name ?? '') || parentId !== (initialParentId ?? '')}
+    >
+      <form onSubmit={(event) => {
+        event.preventDefault()
+        if (!name.trim()) return
+        setSaving(true)
+        void onSave(name, parentId || null).finally(() => setSaving(false))
+      }}>
+        <label className="field">
+          <span>分类名称</span>
+          <input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label className="field">
+          <span>上级分类</span>
+          <select value={parentId} onChange={(event) => setParentId(event.target.value)}>
+            <option value="">无（作为一级分类）</option>
+            {availableParents.map(({ group: candidate, depth }) => (
+              <option key={candidate.id} value={candidate.id}>{`${'　'.repeat(depth)}${candidate.name}`}</option>
+            ))}
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button className="button ghost" type="button" data-modal-close>取消</button>
+          <button className="button primary" type="submit" disabled={saving || !name.trim()}>
+            {saving ? <LoaderCircle className="spin" size={15} /> : <FolderPlus size={15} />}
+            {group ? '保存分类' : '创建分类'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+interface DocumentGroupAssignmentDialogProps {
+  document: DocumentSummary
+  groups: Array<{ group: DocumentGroup; depth: number }>
+  onSave: (groupId: string | null) => Promise<void>
+  onClose: () => void
+}
+
+function DocumentGroupAssignmentDialog({
+  document,
+  groups,
+  onSave,
+  onClose
+}: DocumentGroupAssignmentDialogProps): React.JSX.Element {
+  const [groupId, setGroupId] = useState(document.groupId ?? '')
+  const [saving, setSaving] = useState(false)
+  return (
+    <Modal
+      title="调整文献分类"
+      subtitle={document.title}
+      onClose={onClose}
+      hasUnsavedChanges={groupId !== (document.groupId ?? '')}
+    >
+      <form onSubmit={(event) => {
+        event.preventDefault()
+        setSaving(true)
+        void onSave(groupId || null).finally(() => setSaving(false))
+      }}>
+        <label className="field">
+          <span>放入</span>
+          <select autoFocus value={groupId} onChange={(event) => setGroupId(event.target.value)}>
+            <option value="">未分类</option>
+            {groups.map(({ group, depth }) => (
+              <option key={group.id} value={group.id}>{`${'　'.repeat(depth)}${group.name}`}</option>
+            ))}
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button className="button ghost" type="button" data-modal-close>取消</button>
+          <button className="button primary" type="submit" disabled={saving || groupId === (document.groupId ?? '')}>
+            {saving ? <LoaderCircle className="spin" size={15} /> : <FolderInput size={15} />}
+            保存分类
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 

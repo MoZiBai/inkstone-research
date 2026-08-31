@@ -32,8 +32,19 @@ export interface DocumentSummary {
   filePath: string | null
   fileHash: string | null
   fileAvailable: boolean
+  groupId: string | null
   sortOrder: number
   cardCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DocumentGroup {
+  id: string
+  projectId: string
+  parentId: string | null
+  name: string
+  sortOrder: number
   createdAt: string
   updatedAt: string
 }
@@ -155,6 +166,7 @@ export interface WorkspaceSnapshot {
   projects: ProjectSummary[]
   currentProjectId: string | null
   documents: DocumentSummary[]
+  documentGroups: DocumentGroup[]
   categories: SynthesisCategory[]
   researchRoles: ResearchRole[]
   cards: ProjectCardView[]
@@ -205,6 +217,24 @@ export interface RemoveDocumentInput {
   projectId: string
   documentId: string
   keepCards: boolean
+}
+
+export interface CreateDocumentGroupInput {
+  projectId: string
+  parentId?: string | null
+  name: string
+}
+
+export interface UpdateDocumentGroupInput {
+  groupId: string
+  parentId?: string | null
+  name: string
+}
+
+export interface MoveDocumentToGroupInput {
+  projectId: string
+  documentId: string
+  groupId?: string | null
 }
 
 export interface ImportPdfResult {
@@ -412,6 +442,10 @@ export interface InkstoneApi {
   updateDocument: (input: UpdateDocumentInput) => Promise<void>
   removeDocument: (input: RemoveDocumentInput) => Promise<void>
   restoreDocument: (projectId: string, documentId: string) => Promise<void>
+  createDocumentGroup: (input: CreateDocumentGroupInput) => Promise<string>
+  updateDocumentGroup: (input: UpdateDocumentGroupInput) => Promise<void>
+  deleteDocumentGroup: (groupId: string) => Promise<void>
+  moveDocumentToGroup: (input: MoveDocumentToGroupInput) => Promise<void>
   importPdf: (input: ImportPdfInput) => Promise<ImportPdfResult>
   exportDatabase: (destinationPath: string) => Promise<string>
   importDatabase: (sourcePath: string) => Promise<DatabaseImportResult>

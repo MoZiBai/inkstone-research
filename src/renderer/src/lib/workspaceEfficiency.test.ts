@@ -13,9 +13,9 @@ const projects: ProjectSummary[] = [
 ]
 
 const documents: DocumentSummary[] = [
-  { id: 'd1', title: '礼制研究', authors: '王明', year: 2020, journal: '考古', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/a.pdf', fileHash: 'a', fileAvailable: true, sortOrder: 1000, cardCount: 2, createdAt: '2024-01-01', updatedAt: '2024-02-01' },
-  { id: 'd2', title: '墓葬材料', authors: '', year: null, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/b.pdf', fileHash: 'b', fileAvailable: false, sortOrder: 2000, cardCount: 0, createdAt: '2024-01-02', updatedAt: '2024-03-01' },
-  { id: 'd3', title: '未连接文献', authors: '李华', year: 2024, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: null, fileHash: null, fileAvailable: false, sortOrder: 3000, cardCount: 1, createdAt: '2024-01-03', updatedAt: '2024-01-03' }
+  { id: 'd1', title: '礼制研究', authors: '王明', year: 2020, journal: '考古', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/a.pdf', fileHash: 'a', fileAvailable: true, groupId: null, sortOrder: 1000, cardCount: 2, createdAt: '2024-01-01', updatedAt: '2024-02-01' },
+  { id: 'd2', title: '墓葬材料', authors: '', year: null, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/b.pdf', fileHash: 'b', fileAvailable: false, groupId: null, sortOrder: 2000, cardCount: 0, createdAt: '2024-01-02', updatedAt: '2024-03-01' },
+  { id: 'd3', title: '未连接文献', authors: '李华', year: 2024, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: null, fileHash: null, fileAvailable: false, groupId: null, sortOrder: 3000, cardCount: 1, createdAt: '2024-01-03', updatedAt: '2024-01-03' }
 ]
 
 const card: ProjectCardView = {
@@ -36,7 +36,7 @@ it('distinguishes available, missing and never-linked documents', () => {
 })
 
 it('searches current project documents and card excerpts, notes and tags', () => {
-  const snapshot = { projects, currentProjectId: 'p1', documents, cards: [card], categories: [], researchRoles: [], pdfAnnotations: [], readingNotes: [], outlineNodes: [], outlineLinks: [] } satisfies WorkspaceSnapshot
+  const snapshot = { projects, currentProjectId: 'p1', documents, documentGroups: [], cards: [card], categories: [], researchRoles: [], pdfAnnotations: [], readingNotes: [], outlineNodes: [], outlineLinks: [] } satisfies WorkspaceSnapshot
   expect(searchCurrentProject(snapshot, '王明').documents.map((item) => item.id)).toContain('d1')
   expect(searchCurrentProject(snapshot, '年代').cards.map((item) => item.id)).toEqual(['c1'])
   expect(searchCurrentProject(snapshot, '礼制').cards.map((item) => item.id)).toEqual(['c1'])

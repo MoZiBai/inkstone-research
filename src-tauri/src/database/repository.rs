@@ -11,12 +11,14 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     BackupCleanupResult, BackupPreferences, BackupRecord, BatchUpdateCardsInput,
-    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
-    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
-    DatabaseImportPreview, DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
-    OutlineCardLink, OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary,
-    ReadingNote, RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput,
-    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentGroupInput,
+    CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput, CreateProjectInput,
+    CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview, DocumentGroup,
+    DocumentSummary, ImportPdfInput, ImportPdfResult, MoveDocumentToGroupInput,
+    MoveOutlineNodeInput, OutlineCardLink, OutlineNode, OutlinePlacement, PdfAnnotation,
+    ProjectCardView, ProjectSummary, ReadingNote, RemoveDocumentInput, ResearchRole,
+    SynthesisCategory, UpdateCardInput, UpdateCategoryInput, UpdateDocumentGroupInput,
+    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
     UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
     WorkspaceSnapshot,
 };
@@ -85,6 +87,7 @@ impl Repository {
                 projects,
                 current_project_id: None,
                 documents: Vec::new(),
+                document_groups: Vec::new(),
                 categories: Vec::new(),
                 research_roles: Vec::new(),
                 cards: Vec::new(),
@@ -100,7 +103,7 @@ impl Repository {
                 r#"
                 SELECT d.id, d.title, d.authors, d.year,
                        d.journal, d.volume, d.issue, d.pages, d.doi, d.publisher, d.metadata_raw,
-                       pd.removed_at IS NOT NULL, d.file_path, d.file_hash, pd.sort_order,
+                       pd.removed_at IS NOT NULL, d.file_path, d.file_hash, pd.group_id, pd.sort_order,
                        COUNT(pc.id) AS card_count,
                        d.created_at, d.updated_at
                 FROM project_documents pd
@@ -130,10 +133,34 @@ impl Repository {
                     file_path: row.get(12)?,
                     file_hash: row.get(13)?,
                     file_available: false,
-                    sort_order: row.get(14)?,
-                    card_count: row.get(15)?,
-                    created_at: row.get(16)?,
-                    updated_at: row.get(17)?,
+                    group_id: row.get(14)?,
+                    sort_order: row.get(15)?,
+                    card_count: row.get(16)?,
+                    created_at: row.get(17)?,
+                    updated_at: row.get(18)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let document_groups = {
+            let mut statement = self.connection.prepare(
+                r#"
+                SELECT id, project_id, parent_id, name, sort_order, created_at, updated_at
+                FROM document_groups
+                WHERE project_id = ?1
+                ORDER BY parent_id IS NOT NULL, sort_order, created_at
+                "#,
+            )?;
+            let rows = statement.query_map(params![project_id], |row| {
+                Ok(DocumentGroup {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    name: row.get(3)?,
+                    sort_order: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -387,6 +414,7 @@ impl Repository {
             projects,
             current_project_id,
             documents,
+            document_groups,
             categories,
             research_roles,
             cards,
@@ -611,6 +639,124 @@ impl Repository {
         if changed == 0 {
             return Err(AppError::NotFound("文献".into()));
         }
+        Ok(())
+    }
+
+    pub fn create_document_group(&mut self, input: CreateDocumentGroupInput) -> AppResult<String> {
+        let name = required_text(&input.name, "文献分类名称")?;
+        ensure_project_exists(&self.connection, &input.project_id)?;
+        ensure_document_group_parent(
+            &self.connection,
+            &input.project_id,
+            input.parent_id.as_deref(),
+            None,
+        )?;
+        ensure_document_group_name_available(
+            &self.connection,
+            &input.project_id,
+            input.parent_id.as_deref(),
+            &name,
+            None,
+        )?;
+
+        let sort_order: i64 = self.connection.query_row(
+            r#"
+            SELECT COALESCE(MAX(sort_order), 0) + 1000
+            FROM document_groups
+            WHERE project_id = ?1 AND parent_id IS ?2
+            "#,
+            params![input.project_id, input.parent_id],
+            |row| row.get(0),
+        )?;
+        let group_id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        self.connection.execute(
+            r#"
+            INSERT INTO document_groups
+              (id, project_id, parent_id, name, sort_order, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            "#,
+            params![
+                group_id,
+                input.project_id,
+                input.parent_id,
+                name,
+                sort_order,
+                now
+            ],
+        )?;
+        Ok(group_id)
+    }
+
+    pub fn update_document_group(&mut self, input: UpdateDocumentGroupInput) -> AppResult<()> {
+        let name = required_text(&input.name, "文献分类名称")?;
+        let project_id: String = self
+            .connection
+            .query_row(
+                "SELECT project_id FROM document_groups WHERE id = ?1",
+                params![input.group_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound("文献分类".into()))?;
+        ensure_document_group_parent(
+            &self.connection,
+            &project_id,
+            input.parent_id.as_deref(),
+            Some(&input.group_id),
+        )?;
+        ensure_document_group_name_available(
+            &self.connection,
+            &project_id,
+            input.parent_id.as_deref(),
+            &name,
+            Some(&input.group_id),
+        )?;
+        self.connection.execute(
+            r#"
+            UPDATE document_groups
+            SET parent_id = ?1, name = ?2, updated_at = ?3
+            WHERE id = ?4
+            "#,
+            params![input.parent_id, name, timestamp(), input.group_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_document_group(&mut self, group_id: &str) -> AppResult<()> {
+        let changed = self.connection.execute(
+            "DELETE FROM document_groups WHERE id = ?1",
+            params![group_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("文献分类".into()));
+        }
+        Ok(())
+    }
+
+    pub fn move_document_to_group(&mut self, input: MoveDocumentToGroupInput) -> AppResult<()> {
+        ensure_project_document_relation(&self.connection, &input.project_id, &input.document_id)?;
+        if let Some(group_id) = input.group_id.as_deref() {
+            let group_project_id: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT project_id FROM document_groups WHERE id = ?1",
+                    params![group_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if group_project_id.as_deref() != Some(input.project_id.as_str()) {
+                return Err(AppError::Validation("目标文献分类不属于当前项目。".into()));
+            }
+        }
+        self.connection.execute(
+            r#"
+            UPDATE project_documents
+            SET group_id = ?1
+            WHERE project_id = ?2 AND document_id = ?3
+            "#,
+            params![input.group_id, input.project_id, input.document_id],
+        )?;
         Ok(())
     }
 
@@ -2583,9 +2729,14 @@ const IMPORT_TABLES: &[ImportTableSpec] = &[
         columns: &["id", "title", "authors", "year", "file_path", "file_hash", "created_at", "updated_at", "journal", "volume", "issue", "pages", "doi", "publisher", "metadata_raw"],
     },
     ImportTableSpec {
+        table: "document_groups",
+        identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.parent_id IS s.parent_id AND d.name IS s.name)",
+        columns: &["id", "project_id", "parent_id", "name", "sort_order", "created_at", "updated_at"],
+    },
+    ImportTableSpec {
         table: "project_documents",
         identity: "d.project_id IS s.project_id AND d.document_id IS s.document_id",
-        columns: &["project_id", "document_id", "sort_order", "created_at", "removed_at"],
+        columns: &["project_id", "document_id", "sort_order", "created_at", "removed_at", "group_id"],
     },
     ImportTableSpec {
         table: "source_excerpts",
@@ -2745,10 +2896,19 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
                    journal, volume, issue, pages, doi, publisher, metadata_raw
             FROM import_db.documents;
 
+            INSERT OR IGNORE INTO document_groups
+              (id, project_id, parent_id, name, sort_order, created_at, updated_at)
+            SELECT id, project_id, parent_id, name, sort_order, created_at, updated_at
+            FROM import_db.document_groups;
+
             INSERT OR IGNORE INTO project_documents
-              (project_id, document_id, sort_order, created_at, removed_at)
-            SELECT project_id, document_id, sort_order, created_at, removed_at
-            FROM import_db.project_documents;
+              (project_id, document_id, sort_order, created_at, removed_at, group_id)
+            SELECT pd.project_id, pd.document_id, pd.sort_order, pd.created_at, pd.removed_at,
+                   CASE WHEN EXISTS(
+                     SELECT 1 FROM main.document_groups dg
+                     WHERE dg.id = pd.group_id AND dg.project_id = pd.project_id
+                   ) THEN pd.group_id ELSE NULL END
+            FROM import_db.project_documents pd;
 
             INSERT OR IGNORE INTO source_excerpts
               (id, document_id, raw_text, clean_text, pdf_page, print_page,
@@ -2954,6 +3114,9 @@ fn validate_database_file(path: &Path) -> AppResult<()> {
     }
     if version >= 8 {
         required_tables.push("backup_records");
+    }
+    if version >= 9 {
+        required_tables.push("document_groups");
     }
     for table in required_tables {
         let exists: i64 = connection.query_row(
@@ -3387,6 +3550,76 @@ fn ensure_project_document_relation(
     }
 }
 
+fn ensure_document_group_parent(
+    connection: &Connection,
+    project_id: &str,
+    parent_id: Option<&str>,
+    moving_group_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(parent_id) = parent_id else {
+        return Ok(());
+    };
+    if moving_group_id == Some(parent_id) {
+        return Err(AppError::Validation("文献分类不能成为自己的上级。".into()));
+    }
+    let parent_project_id: Option<String> = connection
+        .query_row(
+            "SELECT project_id FROM document_groups WHERE id = ?1",
+            params![parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if parent_project_id.as_deref() != Some(project_id) {
+        return Err(AppError::Validation("上级文献分类不属于当前项目。".into()));
+    }
+    if let Some(group_id) = moving_group_id {
+        let creates_cycle: i64 = connection.query_row(
+            r#"
+            WITH RECURSIVE descendants(id) AS (
+              SELECT id FROM document_groups WHERE parent_id = ?1
+              UNION ALL
+              SELECT dg.id
+              FROM document_groups dg
+              JOIN descendants d ON dg.parent_id = d.id
+            )
+            SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)
+            "#,
+            params![group_id, parent_id],
+            |row| row.get(0),
+        )?;
+        if creates_cycle == 1 {
+            return Err(AppError::Validation(
+                "不能把文献分类移入自己的下级分类。".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_document_group_name_available(
+    connection: &Connection,
+    project_id: &str,
+    parent_id: Option<&str>,
+    name: &str,
+    excluded_id: Option<&str>,
+) -> AppResult<()> {
+    let duplicate: i64 = connection.query_row(
+        r#"
+        SELECT EXISTS(
+          SELECT 1 FROM document_groups
+          WHERE project_id = ?1 AND parent_id IS ?2 AND name = ?3
+            AND id != COALESCE(?4, '')
+        )
+        "#,
+        params![project_id, parent_id, name, excluded_id],
+        |row| row.get(0),
+    )?;
+    if duplicate == 1 {
+        return Err(AppError::Validation("同一级中已存在同名文献分类。".into()));
+    }
+    Ok(())
+}
+
 fn sibling_ids(
     transaction: &Transaction<'_>,
     project_id: &str,
@@ -3430,6 +3663,70 @@ fn write_outline_link_order(transaction: &Transaction<'_>, ids: &[String]) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hierarchical_document_groups_move_documents_and_delete_without_data_loss() {
+        let mut repository = Repository::memory().expect("memory database");
+        let root_group = repository
+            .create_document_group(CreateDocumentGroupInput {
+                project_id: "seed-project-tombs".into(),
+                parent_id: None,
+                name: "时代".into(),
+            })
+            .expect("create root group");
+        let child_group = repository
+            .create_document_group(CreateDocumentGroupInput {
+                project_id: "seed-project-tombs".into(),
+                parent_id: Some(root_group.clone()),
+                name: "汉代".into(),
+            })
+            .expect("create child group");
+        repository
+            .move_document_to_group(MoveDocumentToGroupInput {
+                project_id: "seed-project-tombs".into(),
+                document_id: "seed-document-space".into(),
+                group_id: Some(child_group.clone()),
+            })
+            .expect("assign document to child group");
+
+        let grouped = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("grouped workspace");
+        assert_eq!(grouped.document_groups.len(), 2);
+        assert_eq!(
+            grouped
+                .documents
+                .iter()
+                .find(|document| document.id == "seed-document-space")
+                .expect("grouped document")
+                .group_id
+                .as_deref(),
+            Some(child_group.as_str())
+        );
+        assert!(repository
+            .update_document_group(UpdateDocumentGroupInput {
+                group_id: root_group.clone(),
+                parent_id: Some(child_group),
+                name: "时代".into(),
+            })
+            .is_err());
+
+        repository
+            .delete_document_group(&root_group)
+            .expect("delete group tree");
+        let ungrouped = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after group deletion");
+        assert!(ungrouped.document_groups.is_empty());
+        assert!(ungrouped
+            .documents
+            .iter()
+            .find(|document| document.id == "seed-document-space")
+            .expect("retained document")
+            .group_id
+            .is_none());
+        assert!(ungrouped.cards.iter().any(|card| card.id == "seed-card-1"));
+    }
 
     #[test]
     fn exclusion_preserves_card_and_outline_links() {
@@ -4562,8 +4859,9 @@ mod tests {
         let project_export_path = root.join("project.db");
         let target_path = root.join("target.db");
         let safety_path = root.join("before-project-import.db");
+        let repeat_safety_path = root.join("before-repeat-project-import.db");
 
-        let (note_id, annotation_id) = {
+        let (note_id, annotation_id, document_group_id) = {
             let mut source = Repository::open(&source_path).expect("open source repository");
             source
                 .connection
@@ -4602,10 +4900,24 @@ mod tests {
                     comment: "项目导入批注说明".into(),
                 })
                 .expect("create source project annotation");
+            let document_group_id = source
+                .create_document_group(CreateDocumentGroupInput {
+                    project_id: "seed-project-tombs".into(),
+                    parent_id: None,
+                    name: "导入保留的文献分类".into(),
+                })
+                .expect("create source document group");
+            source
+                .move_document_to_group(MoveDocumentToGroupInput {
+                    project_id: "seed-project-tombs".into(),
+                    document_id: "seed-document-space".into(),
+                    group_id: Some(document_group_id.clone()),
+                })
+                .expect("assign source document group");
             source
                 .export_project_database("seed-project-tombs", &project_export_path)
                 .expect("export one project");
-            (note_id, annotation_id)
+            (note_id, annotation_id, document_group_id)
         };
 
         {
@@ -4651,11 +4963,47 @@ mod tests {
                 .iter()
                 .any(|annotation| annotation.id == annotation_id));
             assert!(restored
+                .document_groups
+                .iter()
+                .any(|group| group.id == document_group_id));
+            assert_eq!(
+                restored
+                    .documents
+                    .iter()
+                    .find(|document| document.id == "seed-document-space")
+                    .expect("imported grouped document")
+                    .group_id
+                    .as_deref(),
+                Some(document_group_id.as_str())
+            );
+            assert!(restored
                 .outline_links
                 .iter()
                 .any(|link| link.id == "seed-link-1"));
             ensure_foreign_keys_are_valid(&target.connection)
                 .expect("foreign keys after project import");
+
+            let first_group_count = restored.document_groups.len();
+            assert_eq!(
+                target
+                    .import_project_database(&project_export_path, &repeat_safety_path)
+                    .expect("repeat project import"),
+                (1, 0)
+            );
+            let repeated = target
+                .get_workspace(Some("seed-project-tombs"))
+                .expect("workspace after repeated project import");
+            assert_eq!(repeated.document_groups.len(), first_group_count);
+            assert_eq!(
+                repeated
+                    .documents
+                    .iter()
+                    .find(|document| document.id == "seed-document-space")
+                    .expect("repeated grouped document")
+                    .group_id
+                    .as_deref(),
+                Some(document_group_id.as_str())
+            );
         }
 
         fs::remove_dir_all(root).expect("remove project import directory");

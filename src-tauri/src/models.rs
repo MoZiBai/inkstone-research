@@ -32,8 +32,21 @@ pub struct DocumentSummary {
     pub file_path: Option<String>,
     pub file_hash: Option<String>,
     pub file_available: bool,
+    pub group_id: Option<String>,
     pub sort_order: i64,
     pub card_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentGroup {
+    pub id: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -157,6 +170,7 @@ pub struct WorkspaceSnapshot {
     pub projects: Vec<ProjectSummary>,
     pub current_project_id: Option<String>,
     pub documents: Vec<DocumentSummary>,
+    pub document_groups: Vec<DocumentGroup>,
     pub categories: Vec<SynthesisCategory>,
     pub research_roles: Vec<ResearchRole>,
     pub cards: Vec<ProjectCardView>,
@@ -265,6 +279,30 @@ pub struct RemoveDocumentInput {
     pub project_id: String,
     pub document_id: String,
     pub keep_cards: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDocumentGroupInput {
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDocumentGroupInput {
+    pub group_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveDocumentToGroupInput {
+    pub project_id: String,
+    pub document_id: String,
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
