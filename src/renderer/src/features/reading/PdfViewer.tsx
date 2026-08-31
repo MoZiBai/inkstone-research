@@ -42,7 +42,7 @@ import {
   pdfLocatorContainsPoint,
   type PdfSelection
 } from './pdfLocator'
-import { clampPdfScale, scaleFromCtrlWheel } from './pdfZoom'
+import { clampPdfScale, scaleFromCtrlWheel, scaleFromStep } from './pdfZoom'
 import { findPdfTextMatches, nextPdfSearchIndex, type PdfTextSearchMatch } from './pdfSearch'
 
 GlobalWorkerOptions.workerSrc = workerUrl
@@ -59,7 +59,7 @@ interface PdfViewerProps {
   focusPage: number | null
   focusLocator: PdfLocator | null
   onCreateCard: (selection: PdfSelection) => void
-  onCreateAnnotation: (selection: PdfSelection, kind: PdfAnnotationKind) => void
+  onCreateAnnotation: (selection: PdfSelection, kind: PdfAnnotationKind, color: string) => void
   onCreateReadingNote: (selection: PdfSelection, kind: 'insight' | 'critique') => void
   onRequestDeleteAnnotation: (annotation: PdfAnnotation) => void
   onRequestEditAnnotation: (annotation: PdfAnnotation) => void
@@ -131,11 +131,16 @@ export function PdfViewer({
   const [activeSearchIndex, setActiveSearchIndex] = useState(-1)
   const [searchState, setSearchState] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle')
   const [viewerContextMenu, setViewerContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [annotationColors, setAnnotationColors] = useState<Record<PdfAnnotationKind, string>>(
+    loadDefaultAnnotationColors
+  )
+  const [selectionColorPicker, setSelectionColorPicker] = useState<PdfAnnotationKind | null>(null)
 
   const clearSelection = useCallback((): void => {
     setSelection(null)
     setToolbarPosition(null)
     setAnnotationMenu(null)
+    setSelectionColorPicker(null)
     window.getSelection()?.removeAllRanges()
   }, [])
 
@@ -584,7 +589,7 @@ export function PdfViewer({
           clientRect
         })
         setAnnotationMenu(null)
-        const toolbarWidth = Math.min(510, window.innerWidth - 24)
+        const toolbarWidth = Math.min(660, window.innerWidth - 24)
         setToolbarPosition({
           left: Math.min(
             window.innerWidth - toolbarWidth - 12,
@@ -626,10 +631,16 @@ export function PdfViewer({
     clearSelection()
   }
 
-  const createAnnotation = (kind: PdfAnnotationKind): void => {
+  const createAnnotation = (kind: PdfAnnotationKind, color = annotationColors[kind]): void => {
     if (!selection) return
-    onCreateAnnotation(selection, kind)
+    onCreateAnnotation(selection, kind, color)
     clearSelection()
+  }
+
+  const chooseAnnotationColor = (kind: PdfAnnotationKind, color: string): void => {
+    setAnnotationColors((current) => ({ ...current, [kind]: color }))
+    saveDefaultAnnotationColor(kind, color)
+    createAnnotation(kind, color)
   }
 
   const createReadingNote = (kind: 'insight' | 'critique'): void => {
@@ -769,7 +780,7 @@ export function PdfViewer({
           <button
             className="pdf-tool-button"
             type="button"
-            onClick={() => changeScale(scaleRef.current - 0.1)}
+            onClick={() => changeScale(scaleFromStep(scaleRef.current, -1))}
             aria-label="缩小"
             title="缩小"
           >
@@ -779,7 +790,7 @@ export function PdfViewer({
           <button
             className="pdf-tool-button"
             type="button"
-            onClick={() => changeScale(scaleRef.current + 0.1)}
+            onClick={() => changeScale(scaleFromStep(scaleRef.current, 1))}
             aria-label="放大"
             title="放大"
           >
@@ -888,12 +899,52 @@ export function PdfViewer({
           <button type="button" onClick={createCard} title="创建研究卡片">
             <span className="selection-tool-mark card-mark">卡</span>摘录成卡片
           </button>
-          <button type="button" onClick={() => createAnnotation('highlight')} title="保存高亮">
-            <Highlighter size={14} />高亮
-          </button>
-          <button type="button" onClick={() => createAnnotation('underline')} title="保存下划线">
-            <Underline size={14} />下划线
-          </button>
+          <div className="selection-annotation-tool">
+            <button type="button" onClick={() => createAnnotation('highlight')} title="使用当前颜色保存高亮">
+              <Highlighter size={14} />高亮
+              <span className="selection-current-color" style={{ '--swatch-color': annotationColors.highlight } as React.CSSProperties} />
+            </button>
+            <button
+              className="selection-color-trigger"
+              type="button"
+              onClick={() => setSelectionColorPicker((current) => current === 'highlight' ? null : 'highlight')}
+              title="选择高亮颜色"
+              aria-label="选择高亮颜色"
+              aria-expanded={selectionColorPicker === 'highlight'}
+            >
+              <ChevronRight size={12} />
+            </button>
+            {selectionColorPicker === 'highlight' ? (
+              <SelectionAnnotationColors
+                kind="highlight"
+                currentColor={annotationColors.highlight}
+                onChoose={chooseAnnotationColor}
+              />
+            ) : null}
+          </div>
+          <div className="selection-annotation-tool">
+            <button type="button" onClick={() => createAnnotation('underline')} title="使用当前颜色保存下划线">
+              <Underline size={14} />下划线
+              <span className="selection-current-color" style={{ '--swatch-color': annotationColors.underline } as React.CSSProperties} />
+            </button>
+            <button
+              className="selection-color-trigger"
+              type="button"
+              onClick={() => setSelectionColorPicker((current) => current === 'underline' ? null : 'underline')}
+              title="选择下划线颜色"
+              aria-label="选择下划线颜色"
+              aria-expanded={selectionColorPicker === 'underline'}
+            >
+              <ChevronRight size={12} />
+            </button>
+            {selectionColorPicker === 'underline' ? (
+              <SelectionAnnotationColors
+                kind="underline"
+                currentColor={annotationColors.underline}
+                onChoose={chooseAnnotationColor}
+              />
+            ) : null}
+          </div>
           <button type="button" onClick={() => createReadingNote('insight')} title="记录与原文关联的灵感">
             <span className="selection-tool-mark insight-mark">灵</span>灵感
           </button>
@@ -987,8 +1038,8 @@ export function PdfViewer({
           ariaLabel="PDF 阅读操作"
           onClose={() => setViewerContextMenu(null)}
           items={[
-            { id: 'zoom-in', label: '放大 PDF', icon: <ZoomIn size={14} />, onSelect: () => changeScale(scaleRef.current + 0.1) },
-            { id: 'zoom-out', label: '缩小 PDF', icon: <ZoomOut size={14} />, onSelect: () => changeScale(scaleRef.current - 0.1) },
+            { id: 'zoom-in', label: '放大 PDF', icon: <ZoomIn size={14} />, onSelect: () => changeScale(scaleFromStep(scaleRef.current, 1)) },
+            { id: 'zoom-out', label: '缩小 PDF', icon: <ZoomOut size={14} />, onSelect: () => changeScale(scaleFromStep(scaleRef.current, -1)) },
             { id: 'fit-width', label: '适合阅读区宽度', icon: <Maximize2 size={14} />, separatorBefore: true, onSelect: fitToWidth },
             { id: 'find', label: '在文献中查找', icon: <Search size={14} />, onSelect: () => {
               setSearchOpen(true)
@@ -1002,6 +1053,67 @@ export function PdfViewer({
 }
 
 const ANNOTATION_COLORS = ['#e8bd55', '#7fa88b', '#6f9fb4', '#c97d77', '#a45f45', '#8b7eae']
+const DEFAULT_ANNOTATION_COLORS: Record<PdfAnnotationKind, string> = {
+  highlight: '#e8bd55',
+  underline: '#a45f45'
+}
+const ANNOTATION_COLOR_STORAGE_KEYS: Record<PdfAnnotationKind, string> = {
+  highlight: 'inkstone:pdf-highlight-color:v1',
+  underline: 'inkstone:pdf-underline-color:v1'
+}
+
+interface SelectionAnnotationColorsProps {
+  kind: PdfAnnotationKind
+  currentColor: string
+  onChoose: (kind: PdfAnnotationKind, color: string) => void
+}
+
+function SelectionAnnotationColors({
+  kind,
+  currentColor,
+  onChoose
+}: SelectionAnnotationColorsProps): React.JSX.Element {
+  return (
+    <div className="selection-annotation-colors" role="group" aria-label={`${kind === 'highlight' ? '高亮' : '下划线'}颜色`}>
+      {ANNOTATION_COLORS.map((color) => (
+        <button
+          className={currentColor.toLocaleLowerCase() === color ? 'active' : ''}
+          key={color}
+          type="button"
+          style={{ '--swatch-color': color } as React.CSSProperties}
+          title={`使用 ${color} 并设为默认`}
+          aria-label={`使用 ${color} 并设为默认`}
+          onClick={() => onChoose(kind, color)}
+        />
+      ))}
+    </div>
+  )
+}
+
+function loadDefaultAnnotationColors(): Record<PdfAnnotationKind, string> {
+  return {
+    highlight: loadDefaultAnnotationColor('highlight'),
+    underline: loadDefaultAnnotationColor('underline')
+  }
+}
+
+function loadDefaultAnnotationColor(kind: PdfAnnotationKind): string {
+  try {
+    const stored = window.localStorage.getItem(ANNOTATION_COLOR_STORAGE_KEYS[kind])?.toLocaleLowerCase()
+    if (stored && ANNOTATION_COLORS.includes(stored)) return stored
+  } catch {
+    // Persisting a preferred color is optional; annotation creation still works.
+  }
+  return DEFAULT_ANNOTATION_COLORS[kind]
+}
+
+function saveDefaultAnnotationColor(kind: PdfAnnotationKind, color: string): void {
+  try {
+    window.localStorage.setItem(ANNOTATION_COLOR_STORAGE_KEYS[kind], color)
+  } catch {
+    // Keep the in-memory preference when local storage is unavailable.
+  }
+}
 
 interface PdfPageViewProps {
   pageInfo: PageInfo
@@ -1061,7 +1173,9 @@ const PdfPageView = memo(function PdfPageView({
         page = await pdf.getPage(pageInfo.pageNumber)
         if (cancelled) return
         const viewport = page.getViewport({ scale })
-        const outputScale = Math.min(window.devicePixelRatio || 1, 2)
+        // Keep high zoom useful for figures without allocating a second full
+        // device-pixel copy of a page once the CSS zoom is already large.
+        const outputScale = Math.min(window.devicePixelRatio || 1, 2, Math.max(1, 4 / scale))
         canvas.width = Math.max(1, Math.floor(viewport.width * outputScale))
         canvas.height = Math.max(1, Math.floor(viewport.height * outputScale))
         canvas.style.width = `${viewport.width}px`

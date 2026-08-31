@@ -702,7 +702,8 @@ export function ReadingView({
 
   const createAnnotation = async (
     selection: PdfSelection,
-    kind: PdfAnnotationKind
+    kind: PdfAnnotationKind,
+    color: string
   ): Promise<void> => {
     if (!snapshot.currentProjectId || !selectedDocument) return
     await runMutation(
@@ -712,7 +713,7 @@ export function ReadingView({
           documentId: selectedDocument.id,
           kind,
           pageNumber: selection.pageNumber,
-          color: kind === 'highlight' ? '#e8bd55' : '#a45f45',
+          color,
           selectedText: selection.text,
           locatorJson: JSON.stringify(selection.locator)
         }),
@@ -978,7 +979,7 @@ export function ReadingView({
             focusPage={focusRequest?.documentId === selectedDocument.id ? focusRequest.page : null}
             focusLocator={focusRequest?.documentId === selectedDocument.id ? focusRequest.locator : null}
             onCreateCard={(selection) => void createCard(selection)}
-            onCreateAnnotation={(selection, kind) => void createAnnotation(selection, kind)}
+            onCreateAnnotation={(selection, kind, color) => void createAnnotation(selection, kind, color)}
             onCreateReadingNote={(selection, kind) => setPendingNote({ selection, kind })}
             onRequestDeleteAnnotation={setDeletingAnnotation}
             onRequestEditAnnotation={setEditingAnnotation}
