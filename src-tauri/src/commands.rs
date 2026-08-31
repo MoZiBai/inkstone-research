@@ -79,6 +79,7 @@ struct ResolvedBackupDirectory {
     directory: PathBuf,
     warning: Option<String>,
     retention_days: Option<i64>,
+    retention_count: Option<i64>,
     last_cleanup_at: Option<String>,
     last_cleanup_result: Option<String>,
 }
@@ -95,6 +96,7 @@ fn resolved_backup_directory(
                     directory,
                     warning: None,
                     retention_days: preferences.retention_days,
+                    retention_count: preferences.retention_count,
                     last_cleanup_at: preferences.last_cleanup_at,
                     last_cleanup_result: preferences.last_cleanup_result,
                 });
@@ -107,6 +109,7 @@ fn resolved_backup_directory(
                         "自定义备份目录当前不可用，已回退到默认目录：{error}"
                     )),
                     retention_days: preferences.retention_days,
+                    retention_count: preferences.retention_count,
                     last_cleanup_at: preferences.last_cleanup_at,
                     last_cleanup_result: preferences.last_cleanup_result,
                 });
@@ -117,6 +120,7 @@ fn resolved_backup_directory(
         directory: validated_writable_backup_directory(default_directory)?,
         warning: None,
         retention_days: preferences.retention_days,
+        retention_count: preferences.retention_count,
         last_cleanup_at: preferences.last_cleanup_at,
         last_cleanup_result: preferences.last_cleanup_result,
     })
@@ -144,6 +148,7 @@ fn backup_manager_state(
             custom_directory,
             effective_directory: resolved.directory.to_string_lossy().into_owned(),
             retention_days: resolved.retention_days,
+            retention_count: resolved.retention_count,
             automatic_interval_hours: preferences.automatic_interval_hours,
             last_automatic_backup_at: preferences.last_automatic_backup_at,
             last_automatic_backup_result: preferences.last_automatic_backup_result,
@@ -416,13 +421,14 @@ pub async fn import_database(
             "不能把应用正在使用的数据库作为导入文件。".into(),
         ));
     }
-    let (backup_directory, backup_warning, retention_days) = {
+    let (backup_directory, backup_warning, retention_days, retention_count) = {
         let guard = state.lock()?;
         let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
         (
             resolved.directory,
             resolved.warning,
             resolved.retention_days,
+            resolved.retention_count,
         )
     };
     let safety_backup = backup_directory.join(format!(
@@ -447,7 +453,8 @@ pub async fn import_database(
             })
             .count() as i64;
         guard.import_database(&source, &safety_backup)?;
-        let cleanup = guard.cleanup_automatic_backups(&backup_directory, retention_days)?;
+        let cleanup =
+            guard.cleanup_automatic_backups(&backup_directory, retention_days, retention_count)?;
         Ok::<(DatabaseImportPreview, BackupCleanupResult), crate::error::AppError>((
             preview, cleanup,
         ))
@@ -487,13 +494,14 @@ pub async fn import_project_database(
             "不能把应用正在使用的数据库作为项目导入文件。".into(),
         ));
     }
-    let (backup_directory, backup_warning, retention_days) = {
+    let (backup_directory, backup_warning, retention_days, retention_count) = {
         let guard = state.lock()?;
         let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
         (
             resolved.directory,
             resolved.warning,
             resolved.retention_days,
+            resolved.retention_count,
         )
     };
     let safety_backup = backup_directory.join(format!(
@@ -518,7 +526,8 @@ pub async fn import_project_database(
             })
             .count() as i64;
         guard.import_project_database(&source, &safety_backup)?;
-        let cleanup = guard.cleanup_automatic_backups(&backup_directory, retention_days)?;
+        let cleanup =
+            guard.cleanup_automatic_backups(&backup_directory, retention_days, retention_count)?;
         Ok::<(DatabaseImportPreview, BackupCleanupResult), crate::error::AppError>((
             preview, cleanup,
         ))
@@ -568,6 +577,7 @@ pub fn update_backup_settings(
     guard.set_backup_preferences(
         custom_directory.as_deref(),
         input.retention_days,
+        input.retention_count,
         input.automatic_interval_hours,
     )?;
     backup_manager_state(&mut guard, &state.backup_directory)
@@ -600,12 +610,44 @@ pub async fn run_scheduled_backup(state: State<'_, AppState>) -> AppResult<Backu
             guard.export_database(&destination)?;
             guard.record_backup(&destination, "auto", None, Some(&resolved.directory))?;
             guard.mark_automatic_backup_completed(&destination)?;
-            guard.cleanup_automatic_backups(&resolved.directory, resolved.retention_days)?;
+            guard.cleanup_automatic_backups(
+                &resolved.directory,
+                resolved.retention_days,
+                resolved.retention_count,
+            )?;
         }
         backup_manager_state(&mut guard, &default_directory)
     })
     .await
     .map_err(|error| AppError::Validation(format!("自动备份任务失败：{error}")))?
+}
+
+#[tauri::command]
+pub async fn create_backup_snapshot(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
+    let repository = Arc::clone(&state.repository);
+    let default_directory = state.backup_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository
+            .lock()
+            .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))?;
+        let resolved = resolved_backup_directory(&guard, &default_directory)?;
+        let destination = resolved.directory.join(format!(
+            "inkstone-before-manual-{}-{}.db",
+            Utc::now().format("%Y%m%d-%H%M%S"),
+            &Uuid::new_v4().to_string()[..8]
+        ));
+        guard.export_database(&destination)?;
+        guard.record_backup(&destination, "auto", None, Some(&resolved.directory))?;
+        guard.mark_automatic_backup_completed(&destination)?;
+        guard.cleanup_automatic_backups(
+            &resolved.directory,
+            resolved.retention_days,
+            resolved.retention_count,
+        )?;
+        backup_manager_state(&mut guard, &default_directory)
+    })
+    .await
+    .map_err(|error| AppError::Validation(format!("主动备份任务失败：{error}")))?
 }
 
 fn scheduled_backup_is_due(
@@ -629,7 +671,11 @@ fn scheduled_backup_is_due(
 pub fn cleanup_backups(state: State<'_, AppState>) -> AppResult<BackupCleanupResult> {
     let mut guard = state.lock()?;
     let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
-    guard.cleanup_automatic_backups(&resolved.directory, resolved.retention_days)
+    guard.cleanup_automatic_backups(
+        &resolved.directory,
+        resolved.retention_days,
+        resolved.retention_count,
+    )
 }
 
 #[tauri::command]

@@ -877,6 +877,82 @@ select:focus-visible {
   font-weight: 700;
 }
 
+.backup-control-panel {
+  display: grid;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.58);
+  box-shadow: 0 6px 18px rgba(48, 42, 34, 0.04);
+}
+
+.backup-location-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.backup-location-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backup-location-copy code {
+  overflow: hidden;
+  color: var(--ink-600);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: calc(11px + var(--font-delta));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-policy-row {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.backup-policy-row label {
+  display: grid;
+  gap: 5px;
+  min-width: 170px;
+}
+
+.backup-policy-row label > span {
+  color: var(--ink-600);
+  font-size: calc(11px + var(--font-delta));
+  font-weight: 700;
+}
+
+.backup-policy-row select {
+  min-height: 32px;
+  padding: 0 30px 0 9px;
+  color: var(--ink-800);
+  border: 1px solid var(--paper-300);
+  border-radius: 7px;
+  background-color: #fff;
+}
+
+.backup-status-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-500);
+  font-size: calc(11px + var(--font-delta));
+  line-height: 1.5;
+}
+
+.backup-now-button {
+  box-shadow: 0 5px 12px rgba(141, 78, 56, 0.13);
+}
+
 .backup-setting-card > code,
 .backup-record-copy code {
   overflow: hidden;
@@ -3995,6 +4071,21 @@ body.reading-panel-resizing * {
 
   .backup-record-actions {
     justify-content: flex-start;
+  }
+
+  .backup-location-row,
+  .backup-status-line {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backup-policy-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backup-policy-row label {
+    min-width: 0;
   }
 
   .database-transfer-options > .database-merge-option {

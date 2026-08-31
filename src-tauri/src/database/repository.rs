@@ -1148,6 +1148,14 @@ impl Repository {
                 })
             })
             .transpose()?;
+        let retention_count = metadata_value(&self.connection, "backup_retention_count")?
+            .map(|value| {
+                value.parse::<i64>().map_err(|_| {
+                    AppError::Validation("自动备份保留份数设置损坏，请重新设置。".into())
+                })
+            })
+            .transpose()?;
+        validate_backup_retention(retention_days, retention_count)?;
         let last_cleanup_at = metadata_value(&self.connection, "backup_last_cleanup_at")?;
         let last_cleanup_result = metadata_value(&self.connection, "backup_last_cleanup_result")?;
         let automatic_interval_hours =
@@ -1167,6 +1175,7 @@ impl Repository {
         Ok(BackupPreferences {
             custom_directory,
             retention_days,
+            retention_count,
             automatic_interval_hours,
             last_automatic_backup_at,
             last_automatic_backup_result,
@@ -1179,13 +1188,10 @@ impl Repository {
         &mut self,
         custom_directory: Option<&Path>,
         retention_days: Option<i64>,
+        retention_count: Option<i64>,
         automatic_interval_hours: i64,
     ) -> AppResult<()> {
-        if retention_days.is_some_and(|days| !(1..=3650).contains(&days)) {
-            return Err(AppError::Validation(
-                "自动备份保留天数必须在 1 到 3650 天之间。".into(),
-            ));
-        }
+        validate_backup_retention(retention_days, retention_count)?;
         validate_automatic_backup_interval(automatic_interval_hours)?;
         let transaction = self.connection.transaction()?;
         set_or_remove_metadata(
@@ -1197,6 +1203,11 @@ impl Repository {
             &transaction,
             "backup_retention_days",
             retention_days.map(|days| days.to_string()),
+        )?;
+        set_or_remove_metadata(
+            &transaction,
+            "backup_retention_count",
+            retention_count.map(|count| count.to_string()),
         )?;
         set_or_remove_metadata(
             &transaction,
@@ -1435,14 +1446,11 @@ impl Repository {
         &mut self,
         directory: &Path,
         retention_days: Option<i64>,
+        retention_count: Option<i64>,
     ) -> AppResult<BackupCleanupResult> {
-        let Some(retention_days) = retention_days else {
+        validate_backup_retention(retention_days, retention_count)?;
+        if retention_days.is_none() && retention_count.is_none() {
             return Ok(BackupCleanupResult::default());
-        };
-        if !(1..=3650).contains(&retention_days) {
-            return Err(AppError::Validation(
-                "自动备份保留天数必须在 1 到 3650 天之间。".into(),
-            ));
         }
         let records = {
             let mut statement = self.connection.prepare(
@@ -1464,7 +1472,7 @@ impl Repository {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        let cutoff = Utc::now() - ChronoDuration::days(retention_days);
+        let cutoff = retention_days.map(|days| Utc::now() - ChronoDuration::days(days));
         let canonical_directory = directory.canonicalize()?;
         let mut valid_index = 0_usize;
         let mut result = BackupCleanupResult::default();
@@ -1519,25 +1527,30 @@ impl Repository {
                 }
             };
             valid_index += 1;
-            if valid_index <= 3 {
-                continue;
-            }
-            let created = match DateTime::parse_from_rfc3339(&created_at) {
-                Ok(value) => value.with_timezone(&Utc),
-                Err(error) => {
-                    result.failed_count += 1;
-                    if failure_reasons.len() < 3 {
-                        failure_reasons.push(format!(
-                            "{}：创建时间无效（{error}）",
-                            path.file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("未知文件")
-                        ));
-                    }
+            let should_delete = if let Some(retention_count) = retention_count {
+                valid_index > retention_count as usize
+            } else {
+                if valid_index <= 3 {
                     continue;
                 }
+                let created = match DateTime::parse_from_rfc3339(&created_at) {
+                    Ok(value) => value.with_timezone(&Utc),
+                    Err(error) => {
+                        result.failed_count += 1;
+                        if failure_reasons.len() < 3 {
+                            failure_reasons.push(format!(
+                                "{}：创建时间无效（{error}）",
+                                path.file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("未知文件")
+                            ));
+                        }
+                        continue;
+                    }
+                };
+                created < cutoff.expect("retention cutoff")
             };
-            if created >= cutoff {
+            if !should_delete {
                 continue;
             }
             let size = fs::metadata(&validated)
@@ -2797,13 +2810,35 @@ fn set_or_remove_metadata(
 }
 
 fn validate_automatic_backup_interval(interval_hours: i64) -> AppResult<()> {
-    if [0, 6, 12, 24, 72, 168].contains(&interval_hours) {
+    if [0, 24, 72, 168, 720].contains(&interval_hours) {
         Ok(())
     } else {
         Err(AppError::Validation(
             "自动备份频率必须使用应用提供的常用选项。".into(),
         ))
     }
+}
+
+fn validate_backup_retention(
+    retention_days: Option<i64>,
+    retention_count: Option<i64>,
+) -> AppResult<()> {
+    if retention_days.is_some() && retention_count.is_some() {
+        return Err(AppError::Validation(
+            "备份只能选择一种自动清理策略。".into(),
+        ));
+    }
+    if retention_days.is_some_and(|days| !(1..=3650).contains(&days)) {
+        return Err(AppError::Validation(
+            "自动备份保留天数必须在 1 到 3650 天之间。".into(),
+        ));
+    }
+    if retention_count.is_some_and(|count| !(3..=500).contains(&count)) {
+        return Err(AppError::Validation(
+            "自动备份保留份数必须在 3 到 500 份之间。".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validated_automatic_backup_path(
@@ -4926,7 +4961,7 @@ mod tests {
         {
             let mut source = Repository::open(&source_path).expect("open source repository");
             source
-                .set_backup_preferences(Some(&root), Some(30), 24)
+                .set_backup_preferences(Some(&root), Some(30), None, 24)
                 .expect("set source-only backup preferences");
             source
                 .export_database(&manual_backup_path)
@@ -5481,7 +5516,7 @@ mod tests {
         {
             let mut repository = Repository::open(&database_path).expect("open database");
             repository
-                .set_backup_preferences(Some(&custom_directory), Some(90), 72)
+                .set_backup_preferences(Some(&custom_directory), None, Some(12), 72)
                 .expect("save backup preferences");
         }
 
@@ -5494,7 +5529,8 @@ mod tests {
                 preferences.custom_directory.as_deref(),
                 Some(custom_directory.to_string_lossy().as_ref())
             );
-            assert_eq!(preferences.retention_days, Some(90));
+            assert_eq!(preferences.retention_days, None);
+            assert_eq!(preferences.retention_count, Some(12));
             assert_eq!(preferences.automatic_interval_hours, 72);
         }
 
@@ -5575,7 +5611,9 @@ mod tests {
                 .last_automatic_backup_result
                 .as_deref()
                 .is_some_and(|result| result.contains("inkstone-before-scheduled")));
-            assert!(repository.set_backup_preferences(None, None, 5).is_err());
+            assert!(repository
+                .set_backup_preferences(None, None, None, 5)
+                .is_err());
         }
 
         for entry in fs::read_dir(&root).expect("list backup scan fixtures") {
@@ -5658,7 +5696,7 @@ mod tests {
             .expect("write unrelated PDF");
 
         let cleanup = repository
-            .cleanup_automatic_backups(&current_directory, Some(30))
+            .cleanup_automatic_backups(&current_directory, Some(30), None)
             .expect("cleanup automatic backups");
 
         assert_eq!(cleanup.deleted_count, 2);
@@ -5710,5 +5748,40 @@ mod tests {
         fs::remove_dir(&current_directory).expect("remove empty current directory");
         fs::remove_dir(&other_directory).expect("remove empty other directory");
         fs::remove_dir(&root).expect("remove empty backup test root");
+    }
+
+    #[test]
+    fn automatic_backup_cleanup_can_keep_a_configured_number_of_files() {
+        let mut repository = Repository::memory().expect("memory database");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-backups")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create count-retention directory");
+        let mut paths = Vec::new();
+        for index in 0..5 {
+            let path = root.join(format!(
+                "inkstone-before-manual-20260831-12000{index}-count.db"
+            ));
+            fs::write(&path, vec![index as u8; 20 + index]).expect("write count backup");
+            repository
+                .record_backup(&path, "auto", None, Some(&root))
+                .expect("record count backup");
+            paths.push(path);
+        }
+
+        let cleanup = repository
+            .cleanup_automatic_backups(&root, None, Some(3))
+            .expect("cleanup by count");
+        assert_eq!(cleanup.deleted_count, 2);
+        assert_eq!(paths.iter().filter(|path| path.is_file()).count(), 3);
+        assert!(repository
+            .cleanup_automatic_backups(&root, Some(30), Some(12))
+            .is_err());
+
+        for path in paths.into_iter().filter(|path| path.is_file()) {
+            fs::remove_file(path).expect("remove count backup");
+        }
+        fs::remove_dir(&root).expect("remove count-retention directory");
     }
 }

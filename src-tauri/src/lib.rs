@@ -53,6 +53,7 @@ pub fn run() {
             commands::get_backup_manager,
             commands::update_backup_settings,
             commands::run_scheduled_backup,
+            commands::create_backup_snapshot,
             commands::cleanup_backups,
             commands::delete_automatic_backup,
             commands::reveal_backup,

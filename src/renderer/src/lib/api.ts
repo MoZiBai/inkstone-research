@@ -72,6 +72,7 @@ export const api: InkstoneApi = {
   previewDatabaseImport: (sourcePath: string, projectOnly: boolean) =>
     invoke<DatabaseImportPreview>('preview_database_import', { sourcePath, projectOnly }),
   getBackupManager: () => invoke<BackupManagerState>('get_backup_manager'),
+  createBackupSnapshot: () => invoke<BackupManagerState>('create_backup_snapshot'),
   runScheduledBackup: () => invoke<BackupManagerState>('run_scheduled_backup'),
   updateBackupSettings: (input: UpdateBackupSettingsInput) =>
     invoke<BackupManagerState>('update_backup_settings', { input }),

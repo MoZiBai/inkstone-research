@@ -358,6 +358,7 @@ export default function App(): React.JSX.Element {
       const next = await api.updateBackupSettings({
         customDirectory: directory,
         retentionDays: backupManager?.settings.retentionDays ?? null,
+        retentionCount: backupManager?.settings.retentionCount ?? null,
         automaticIntervalHours: backupManager?.settings.automaticIntervalHours ?? 24
       })
       setBackupManager(next)
@@ -373,6 +374,7 @@ export default function App(): React.JSX.Element {
   const updateBackupSettings = async (
     customDirectory: string | null,
     retentionDays: number | null,
+    retentionCount: number | null,
     automaticIntervalHours: number
   ): Promise<void> => {
     setBackupManagerBusy(true)
@@ -380,12 +382,26 @@ export default function App(): React.JSX.Element {
       const next = await api.updateBackupSettings({
         customDirectory,
         retentionDays,
+        retentionCount,
         automaticIntervalHours
       })
       setBackupManager(next)
       setBackupManagerError(null)
       notify('自动备份设置已保存。')
       void checkScheduledBackup()
+    } catch (error) {
+      notify(normalizeError(error), 'error')
+    } finally {
+      setBackupManagerBusy(false)
+    }
+  }
+
+  const createBackupSnapshot = async (): Promise<void> => {
+    setBackupManagerBusy(true)
+    try {
+      setBackupManager(await api.createBackupSnapshot())
+      setBackupManagerError(null)
+      notify('当前研究数据库已主动备份。')
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
@@ -911,13 +927,15 @@ export default function App(): React.JSX.Element {
             void updateBackupSettings(
               null,
               backupManager?.settings.retentionDays ?? null,
+              backupManager?.settings.retentionCount ?? null,
               backupManager?.settings.automaticIntervalHours ?? 24
             )
           }
-          onUpdateRetention={(retentionDays) =>
+          onUpdateRetention={(retentionDays, retentionCount) =>
             void updateBackupSettings(
               backupManager?.settings.customDirectory ?? null,
               retentionDays,
+              retentionCount,
               backupManager?.settings.automaticIntervalHours ?? 24
             )
           }
@@ -925,9 +943,11 @@ export default function App(): React.JSX.Element {
             void updateBackupSettings(
               backupManager?.settings.customDirectory ?? null,
               backupManager?.settings.retentionDays ?? null,
+              backupManager?.settings.retentionCount ?? null,
               automaticIntervalHours
             )
           }
+          onCreateSnapshot={() => void createBackupSnapshot()}
           onCleanup={() => void cleanupBackups()}
           onRevealDirectory={() => void api.revealBackupDirectory().catch((error) => notify(normalizeError(error), 'error'))}
           onRevealBackup={(backupId) =>
@@ -1004,8 +1024,9 @@ interface DatabaseTransferDialogProps {
   onRefresh: () => void
   onChooseDirectory: () => void
   onResetDirectory: () => void
-  onUpdateRetention: (retentionDays: number | null) => void
+  onUpdateRetention: (retentionDays: number | null, retentionCount: number | null) => void
   onUpdateInterval: (automaticIntervalHours: number) => void
+  onCreateSnapshot: () => void
   onCleanup: () => void
   onRevealDirectory: () => void
   onRevealBackup: (backupId: string) => void
@@ -1026,6 +1047,7 @@ function DatabaseTransferDialog({
   onResetDirectory,
   onUpdateRetention,
   onUpdateInterval,
+  onCreateSnapshot,
   onCleanup,
   onRevealDirectory,
   onRevealBackup,
@@ -1033,19 +1055,13 @@ function DatabaseTransferDialog({
   onClose
 }: DatabaseTransferDialogProps): React.JSX.Element {
   const retentionDays = manager?.settings.retentionDays ?? null
+  const retentionCount = manager?.settings.retentionCount ?? null
   const automaticIntervalHours = manager?.settings.automaticIntervalHours ?? 24
-  const usesCustomRetention = retentionDays !== null && ![7, 30, 90, 180].includes(retentionDays)
-  const [showCustomRetention, setShowCustomRetention] = useState(usesCustomRetention)
-  const [customRetentionDraft, setCustomRetentionDraft] = useState(
-    usesCustomRetention ? String(retentionDays) : '30'
-  )
-
-  useEffect(() => {
-    setShowCustomRetention(usesCustomRetention)
-    if (usesCustomRetention && retentionDays !== null) {
-      setCustomRetentionDraft(String(retentionDays))
-    }
-  }, [retentionDays, usesCustomRetention])
+  const retentionValue = retentionCount !== null
+    ? `count:${retentionCount}`
+    : retentionDays !== null
+      ? `days:${retentionDays}`
+      : 'never'
 
   const allBusy = busy || managerBusy
   return (
@@ -1100,115 +1116,93 @@ function DatabaseTransferDialog({
 
         {manager ? (
           <>
-            <div className="backup-settings-grid">
-              <div className="backup-setting-card backup-directory-setting">
-                <span className="backup-setting-label">当前自动备份目录</span>
-                <code title={manager.settings.effectiveDirectory}>{manager.settings.effectiveDirectory}</code>
-                {manager.settings.directoryWarning ? (
-                  <p className="backup-manager-warning"><AlertTriangle size={14} /><span>{manager.settings.directoryWarning}</span></p>
-                ) : null}
+            <div className="backup-control-panel">
+              <div className="backup-location-row">
+                <div className="backup-location-copy">
+                  <span className="backup-setting-label">备份位置</span>
+                  <code title={manager.settings.effectiveDirectory}>{manager.settings.effectiveDirectory}</code>
+                </div>
                 <div className="backup-setting-actions">
                   <button className="button ghost compact" type="button" disabled={allBusy} onClick={onRevealDirectory}>
-                    <FolderOpen size={14} /> 打开目录
+                    <FolderOpen size={14} /> 打开
                   </button>
                   <button className="button ghost compact" type="button" disabled={allBusy} onClick={onChooseDirectory}>
-                    更换目录
+                    更换
                   </button>
                   {manager.settings.customDirectory ? (
                     <button className="button ghost compact" type="button" disabled={allBusy} onClick={onResetDirectory}>
                       恢复默认
                     </button>
                   ) : null}
+                  <button className="button primary compact backup-now-button" type="button" disabled={allBusy} onClick={onCreateSnapshot}>
+                    {managerBusy ? <LoaderCircle className="spin" size={14} /> : <DatabaseBackup size={14} />} 立即备份
+                  </button>
                 </div>
-                {manager.settings.customDirectory ? (
-                  <small>旧目录中的备份不会被移动或删除，仍会保留在下方记录中。</small>
-                ) : null}
               </div>
 
-              <div className="backup-setting-card">
-                <label className="backup-retention-field">
-                  <span className="backup-setting-label">周期备份频率</span>
+              {manager.settings.directoryWarning ? (
+                <p className="backup-manager-warning"><AlertTriangle size={14} /><span>{manager.settings.directoryWarning}</span></p>
+              ) : null}
+
+              <div className="backup-policy-row">
+                <label>
+                  <span>周期</span>
                   <select
                     value={String(automaticIntervalHours)}
                     disabled={allBusy}
                     onChange={(event) => onUpdateInterval(Number(event.target.value))}
                   >
                     <option value="0">关闭周期备份</option>
-                    <option value="6">每 6 小时</option>
-                    <option value="12">每 12 小时</option>
                     <option value="24">每天（默认）</option>
                     <option value="72">每 3 天</option>
                     <option value="168">每周</option>
+                    <option value="720">每月</option>
                   </select>
                 </label>
-                <small>应用启动时和运行期间会检查是否到期；关闭后仍保留导入合并前的强制安全备份。</small>
-                {manager.settings.lastAutomaticBackupAt ? (
-                  <small title={manager.settings.lastAutomaticBackupResult ?? undefined}>
-                    最近周期备份：{formatDateTime(manager.settings.lastAutomaticBackupAt)}
-                  </small>
-                ) : (
-                  <small>{automaticIntervalHours === 0 ? '周期备份当前已关闭。' : '尚未完成过周期备份。'}</small>
-                )}
-              </div>
-
-              <div className="backup-setting-card">
-                <label className="backup-retention-field">
-                  <span className="backup-setting-label">自动清理策略</span>
+                <label>
+                  <span>保留</span>
                   <select
-                    value={showCustomRetention ? 'custom' : retentionDays === null ? 'never' : String(retentionDays)}
+                    value={retentionValue}
                     disabled={allBusy}
                     onChange={(event) => {
-                      if (event.target.value === 'custom') {
-                        setShowCustomRetention(true)
-                        return
-                      }
-                      setShowCustomRetention(false)
-                      onUpdateRetention(event.target.value === 'never' ? null : Number(event.target.value))
+                      const [mode, amount] = event.target.value.split(':')
+                      onUpdateRetention(
+                        mode === 'days' ? Number(amount) : null,
+                        mode === 'count' ? Number(amount) : null
+                      )
                     }}
                   >
-                    <option value="never">从不自动清理（默认）</option>
-                    <option value="7">保留最近 7 天</option>
-                    <option value="30">保留最近 30 天</option>
-                    <option value="90">保留最近 90 天</option>
-                    <option value="180">保留最近 180 天</option>
-                    <option value="custom">自定义天数</option>
+                    <option value="never">不自动清理</option>
+                    <option value="count:5">保留最近 5 份</option>
+                    <option value="count:12">保留最近 12 份</option>
+                    <option value="count:30">保留最近 30 份</option>
+                    <option value="days:7">保留最近 7 天</option>
+                    <option value="days:30">保留最近 30 天</option>
+                    <option value="days:90">保留最近 90 天</option>
                   </select>
                 </label>
-                {showCustomRetention ? (
-                  <div className="backup-custom-retention">
-                    <input
-                      type="number"
-                      min={1}
-                      max={3650}
-                      value={customRetentionDraft}
-                      disabled={allBusy}
-                      aria-label="自定义自动备份保留天数"
-                      onChange={(event) => setCustomRetentionDraft(event.target.value)}
-                    />
-                    <span>天</span>
-                    <button
-                      className="button ghost compact"
-                      type="button"
-                      disabled={allBusy || !validRetentionDays(customRetentionDraft)}
-                      onClick={() => onUpdateRetention(Number(customRetentionDraft))}
-                    >
-                      保存
-                    </button>
-                  </div>
-                ) : null}
-                <small>启用清理时仍至少保留最近 3 份有效自动备份；手动导出永不自动清理。</small>
                 <button
-                  className="button ghost compact backup-cleanup-button"
+                  className="button ghost compact"
                   type="button"
-                  disabled={allBusy || retentionDays === null}
+                  disabled={allBusy || retentionValue === 'never'}
                   onClick={onCleanup}
                 >
-                  <RefreshCw size={14} /> 立即按当前策略清理
+                  按策略清理
                 </button>
+              </div>
+
+              <div className="backup-status-line">
+                <span>
+                  {manager.settings.lastAutomaticBackupAt
+                    ? `最近受管备份：${formatDateTime(manager.settings.lastAutomaticBackupAt)}`
+                    : automaticIntervalHours === 0
+                      ? '周期备份已关闭，可随时主动备份'
+                      : '尚未完成过受管备份'}
+                </span>
                 {manager.settings.lastCleanupAt ? (
-                  <small title={manager.settings.lastCleanupResult ?? undefined}>
-                    最近清理：{formatDateTime(manager.settings.lastCleanupAt)} · {manager.settings.lastCleanupResult ?? '已完成'}
-                  </small>
+                  <span title={manager.settings.lastCleanupResult ?? undefined}>
+                    最近清理：{formatDateTime(manager.settings.lastCleanupAt)}
+                  </span>
                 ) : null}
               </div>
             </div>
@@ -1224,7 +1218,7 @@ function DatabaseTransferDialog({
                 <div className="backup-empty"><HardDrive size={20} /><span>当前目录中没有可识别的砚台备份；任意 .db 文件不会被误当作可清理备份。</span></div>
               ) : manager.records.map((record) => (
                 <article className={`backup-record ${record.isAvailable ? '' : 'unavailable'}`} key={record.id}>
-                  <span className={`backup-kind backup-kind-${record.kind}`}>{backupKindLabel(record.kind)}</span>
+                  <span className={`backup-kind backup-kind-${record.kind}`}>{backupKindLabel(record)}</span>
                   <div className="backup-record-copy">
                     <strong title={record.path}>{fileName(record.path)}</strong>
                     <small>{formatDateTime(record.createdAt)} · {formatBytes(record.sizeBytes)}</small>
@@ -1519,14 +1513,14 @@ function formatDateTime(value: string): string {
   }).format(date)
 }
 
-function backupKindLabel(kind: BackupRecord['kind']): string {
-  if (kind === 'auto') return '自动安全备份'
-  if (kind === 'project') return '单项目导出'
+function backupKindLabel(record: BackupRecord): string {
+  if (record.kind === 'auto') {
+    const name = fileName(record.path)
+    if (name.includes('before-manual')) return '主动备份'
+    if (name.includes('before-scheduled')) return '周期备份'
+    if (name.includes('before-project-import') || name.includes('before-import')) return '导入前备份'
+    return '安全备份'
+  }
+  if (record.kind === 'project') return '单项目导出'
   return '完整数据库导出'
-}
-
-function validRetentionDays(value: string): boolean {
-  if (!/^\d+$/.test(value)) return false
-  const days = Number(value)
-  return Number.isInteger(days) && days >= 1 && days <= 3650
 }
