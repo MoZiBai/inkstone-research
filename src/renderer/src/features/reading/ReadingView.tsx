@@ -14,6 +14,8 @@ import {
   Link2,
   LoaderCircle,
   MessageCircleQuestion,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCcw,
   Search,
   Trash2,
@@ -33,6 +35,7 @@ import type {
   WorkspaceSnapshot
 } from '@shared/types'
 import { EmptyState } from '../../components/EmptyState'
+import { ContextMenu } from '../../components/ContextMenu'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
 import {
@@ -77,6 +80,7 @@ interface ReadingViewProps {
   notify: Notify
   initialRequest?: ReadingFocusRequest | null
   onFocusHandled?: () => void
+  onSelectedDocumentChange?: (documentId: string | null) => void
 }
 
 interface MetadataDraft {
@@ -121,7 +125,8 @@ export function ReadingView({
   runMutation,
   notify,
   initialRequest,
-  onFocusHandled
+  onFocusHandled,
+  onSelectedDocumentChange
 }: ReadingViewProps): React.JSX.Element {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(
     initialRequest?.documentId ?? snapshot.documents[0]?.id ?? null
@@ -159,6 +164,12 @@ export function ReadingView({
   const [documentQuery, setDocumentQuery] = useState('')
   const [documentFilter, setDocumentFilter] = useState<DocumentFilter>('all')
   const [documentSort, setDocumentSort] = useState<DocumentSort>('updated')
+  const [documentRailCollapsed, setDocumentRailCollapsed] = useState(false)
+  const [documentContextMenu, setDocumentContextMenu] = useState<{
+    x: number
+    y: number
+    document: DocumentSummary
+  } | null>(null)
   const deferredDocumentQuery = useDeferredValue(documentQuery)
   const focusCounter = useRef(0)
   const readingLayoutRef = useRef<HTMLDivElement>(null)
@@ -226,6 +237,10 @@ export function ReadingView({
   }, [allActiveDocuments, selectedDocumentId, snapshot.currentProjectId, snapshot.documents])
 
   useEffect(() => setCurrentPdfPage(1), [selectedDocument?.id])
+
+  useEffect(() => {
+    onSelectedDocumentChange?.(selectedDocument?.id ?? null)
+  }, [onSelectedDocumentChange, selectedDocument?.id])
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -472,10 +487,10 @@ export function ReadingView({
     if (succeeded) setEditingDocument(null)
   }
 
-  const revealDocument = async (): Promise<void> => {
-    if (!selectedDocument?.filePath) return
+  const revealDocument = async (document: DocumentSummary | null = selectedDocument): Promise<void> => {
+    if (!document?.filePath) return
     try {
-      await api.revealPdfInFileManager(selectedDocument.id)
+      await api.revealPdfInFileManager(document.id)
       notify('已在文件资源管理器中选中砚台管理的 PDF 副本。')
     } catch (error) {
       notify(normalizeError(error), 'error')
@@ -618,22 +633,28 @@ export function ReadingView({
     if (succeeded) setDeletingAnnotation(null)
   }
 
+  const updateAnnotationRecord = async (
+    annotation: PdfAnnotation,
+    color: string,
+    comment: string
+  ): Promise<boolean> => runMutation(
+    () => api.updatePdfAnnotation({ annotationId: annotation.id, color, comment }),
+    'PDF 批注已更新。'
+  )
+
   const updateAnnotation = async (color: string, comment: string): Promise<void> => {
     if (!editingAnnotation) return
-    const succeeded = await runMutation(
-      () => api.updatePdfAnnotation({ annotationId: editingAnnotation.id, color, comment }),
-      'PDF 批注已更新。'
-    )
+    const succeeded = await updateAnnotationRecord(editingAnnotation, color, comment)
     if (succeeded) setEditingAnnotation(null)
   }
 
   return (
     <div
-      className={`reading-layout ${resizingPanel ? 'resizing' : ''}`}
+      className={`reading-layout ${resizingPanel ? 'resizing' : ''} ${documentRailCollapsed ? 'document-rail-collapsed' : ''}`}
       ref={readingLayoutRef}
       style={
         {
-          '--document-rail-width': `${panelWidths.documents}px`,
+          '--document-rail-width': `${documentRailCollapsed ? 48 : panelWidths.documents}px`,
           '--reading-inspector-width': `${panelWidths.inspector}px`
         } as React.CSSProperties
       }
@@ -645,6 +666,15 @@ export function ReadingView({
             <h2>{allActiveDocuments.length} 篇文献</h2>
           </div>
           <div className="document-rail-actions">
+            <button
+              className="icon-button document-rail-collapse"
+              type="button"
+              onClick={() => setDocumentRailCollapsed((current) => !current)}
+              aria-label={documentRailCollapsed ? '展开项目文献' : '收起项目文献'}
+              title={documentRailCollapsed ? '展开项目文献' : '收起项目文献'}
+            >
+              {documentRailCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            </button>
             <button
               className="icon-button warm"
               type="button"
@@ -707,6 +737,11 @@ export function ReadingView({
               type="button"
               key={document.id}
               onClick={() => setSelectedDocumentId(document.id)}
+              onContextMenu={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setDocumentContextMenu({ x: event.clientX, y: event.clientY, document })
+              }}
             >
               <span className="document-symbol">
                 <BookOpen size={15} />
@@ -721,7 +756,6 @@ export function ReadingView({
                   {document.fileAvailable ? 'PDF 可用' : document.filePath ? 'PDF 缺失' : '尚未连接 PDF'} · {document.cardCount} 张卡片
                 </em>
               </span>
-              {document.filePath ? null : <ChevronRight size={14} className="document-unlinked" />}
             </button>
           ))}
           {allActiveDocuments.length === 0 ? (
@@ -803,6 +837,8 @@ export function ReadingView({
             onCreateAnnotation={(selection, kind) => void createAnnotation(selection, kind)}
             onCreateReadingNote={(selection, kind) => setPendingNote({ selection, kind })}
             onRequestDeleteAnnotation={setDeletingAnnotation}
+            onRequestEditAnnotation={setEditingAnnotation}
+            onUpdateAnnotation={updateAnnotationRecord}
             onCurrentPageChange={setCurrentPdfPage}
             onNotify={notify}
           />
@@ -1127,6 +1163,44 @@ export function ReadingView({
         )}
       </aside>
 
+      {documentContextMenu ? (
+        <ContextMenu
+          x={documentContextMenu.x}
+          y={documentContextMenu.y}
+          ariaLabel={`文献“${documentContextMenu.document.title}”操作`}
+          onClose={() => setDocumentContextMenu(null)}
+          items={[
+            {
+              id: 'open',
+              label: '在阅读台打开',
+              icon: <BookOpen size={14} />,
+              onSelect: () => setSelectedDocumentId(documentContextMenu.document.id)
+            },
+            {
+              id: 'edit',
+              label: '编辑书目信息',
+              icon: <FilePenLine size={14} />,
+              onSelect: () => beginEditDocument(documentContextMenu.document)
+            },
+            {
+              id: 'reveal',
+              label: '在文件资源管理器中显示',
+              icon: <FolderOpen size={14} />,
+              disabled: !documentContextMenu.document.fileAvailable,
+              onSelect: () => void revealDocument(documentContextMenu.document)
+            },
+            {
+              id: 'remove',
+              label: documentContextMenu.document.isRemoved ? '彻底删除文献' : '移除文献',
+              icon: <Trash2 size={14} />,
+              danger: true,
+              separatorBefore: true,
+              onSelect: () => setRemovingDocument(documentContextMenu.document)
+            }
+          ]}
+        />
+      ) : null}
+
       {showDocumentDialog ? (
         <Modal
           title="新增文献记录"
@@ -1333,7 +1407,7 @@ function ReadingAnnotationItem({
         className="annotation-delete"
         type="button"
         aria-label="编辑批注"
-        title="编辑颜色与评论"
+        title="编辑批注评论"
         onClick={() => onEdit(annotation)}
       >
         <FilePenLine size={13} />
@@ -1362,29 +1436,23 @@ function PdfAnnotationEditDialog({
   onSave,
   onClose
 }: PdfAnnotationEditDialogProps): React.JSX.Element {
-  const [color, setColor] = useState(annotation.color)
   const [comment, setComment] = useState(annotation.comment)
   const [saving, setSaving] = useState(false)
 
   return (
     <Modal
-      title={`编辑${annotation.kind === 'highlight' ? '高亮' : '下划线'}批注`}
-      subtitle={`PDF 第 ${annotation.pageNumber} 页 · 原文位置保持不变`}
+      title={`${annotation.kind === 'highlight' ? '高亮' : '下划线'}批注评论`}
+      subtitle={`PDF 第 ${annotation.pageNumber} 页 · 颜色请在原文标记上直接修改`}
       onClose={onClose}
       width="large"
-      hasUnsavedChanges={color !== annotation.color || comment !== annotation.comment}
+      hasUnsavedChanges={comment !== annotation.comment}
     >
       <form onSubmit={(event) => {
         event.preventDefault()
         setSaving(true)
-        void onSave(color, comment).finally(() => setSaving(false))
+        void onSave(annotation.color, comment).finally(() => setSaving(false))
       }}>
         <blockquote className="dialog-quote compact">{annotation.selectedText || '未记录选中文字'}</blockquote>
-        <label className="field color-field">
-          <span>批注颜色</span>
-          <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
-          <code>{color}</code>
-        </label>
         <label className="field">
           <span>批注评论（可选）</span>
           <textarea
@@ -1803,6 +1871,12 @@ function CreateCardDialog({
   const [tags, setTags] = useState('')
   const [printPage, setPrintPage] = useState('')
   const [saving, setSaving] = useState(false)
+  const enteredTags = tags.split(/[、,，]/).map((tag) => tag.trim()).filter(Boolean)
+  const tagQuery = tags.split(/[、,，]/).at(-1)?.trim().toLocaleLowerCase() ?? ''
+  const suggestedTags = availableTags
+    .filter((tag) => !enteredTags.includes(tag))
+    .filter((tag) => !tagQuery || tag.toLocaleLowerCase().includes(tagQuery))
+    .slice(0, 8)
 
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
@@ -1851,14 +1925,26 @@ function CreateCardDialog({
         <label className="field">
           <span>标签 <small>可选用已有标签，也可直接输入新标签</small></span>
           <input
-            list="create-card-tag-options"
             value={tags}
             onChange={(event) => setTags(event.target.value)}
             placeholder="空间组织、仪式"
           />
-          <datalist id="create-card-tag-options">
-            {availableTags.map((tag) => <option key={tag} value={tag} />)}
-          </datalist>
+          {suggestedTags.length > 0 ? (
+            <div className="tag-suggestion-list" aria-label="已有标签建议">
+              {suggestedTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => {
+                    const prefix = tags.replace(/[^、,，]*$/, '').trimEnd()
+                    setTags(`${prefix}${tag}、`)
+                  }}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </label>
         <label className="field">
           <span>即时笔记</span>

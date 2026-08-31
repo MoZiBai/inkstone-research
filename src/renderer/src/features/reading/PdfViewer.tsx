@@ -5,6 +5,7 @@ import {
   Highlighter,
   LoaderCircle,
   Maximize2,
+  MessageSquareText,
   MousePointer2,
   Search,
   Trash2,
@@ -32,6 +33,7 @@ import type {
   ProjectCardView
 } from '@shared/types'
 import { api } from '../../lib/api'
+import { ContextMenu } from '../../components/ContextMenu'
 import type { Notify } from '../../types'
 import {
   buildContext,
@@ -60,6 +62,8 @@ interface PdfViewerProps {
   onCreateAnnotation: (selection: PdfSelection, kind: PdfAnnotationKind) => void
   onCreateReadingNote: (selection: PdfSelection, kind: 'insight' | 'critique') => void
   onRequestDeleteAnnotation: (annotation: PdfAnnotation) => void
+  onRequestEditAnnotation: (annotation: PdfAnnotation) => void
+  onUpdateAnnotation: (annotation: PdfAnnotation, color: string, comment: string) => Promise<boolean>
   onCurrentPageChange: (pageNumber: number) => void
   onNotify: Notify
 }
@@ -91,6 +95,8 @@ export function PdfViewer({
   onCreateAnnotation,
   onCreateReadingNote,
   onRequestDeleteAnnotation,
+  onRequestEditAnnotation,
+  onUpdateAnnotation,
   onCurrentPageChange,
   onNotify
 }: PdfViewerProps): React.JSX.Element {
@@ -124,6 +130,7 @@ export function PdfViewer({
   const [searchMatches, setSearchMatches] = useState<PdfTextSearchMatch[]>([])
   const [activeSearchIndex, setActiveSearchIndex] = useState(-1)
   const [searchState, setSearchState] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle')
+  const [viewerContextMenu, setViewerContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   const clearSelection = useCallback((): void => {
     setSelection(null)
@@ -705,6 +712,11 @@ export function PdfViewer({
   return (
     <div
       className="pdf-viewer"
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setViewerContextMenu({ x: event.clientX, y: event.clientY })
+      }}
       onPointerDownCapture={(event) => {
         if (!annotationMenu) return
         const target = event.target instanceof Element ? event.target : null
@@ -911,7 +923,7 @@ export function PdfViewer({
           </header>
           <div className="pdf-annotation-menu-items">
             {annotationMenu.annotations.map((annotation) => (
-              <div key={annotation.id}>
+              <div className="pdf-annotation-menu-row" key={annotation.id}>
                 <span className={`annotation-kind ${annotation.kind}`}>
                   {annotation.kind === 'highlight' ? <Highlighter size={13} /> : <Underline size={13} />}
                 </span>
@@ -919,26 +931,77 @@ export function PdfViewer({
                   <strong>{annotation.kind === 'highlight' ? '高亮' : '下划线'}</strong>
                   <small>{annotation.selectedText || '未记录文字'}</small>
                 </span>
-                <button
-                  className="annotation-delete"
-                  type="button"
-                  title="删除这条批注"
-                  aria-label={`删除${annotation.kind === 'highlight' ? '高亮' : '下划线'}`}
-                  onClick={() => {
-                    setAnnotationMenu(null)
-                    onRequestDeleteAnnotation(annotation)
-                  }}
-                >
-                  <Trash2 size={13} />
-                </button>
+                <div className="pdf-annotation-menu-controls">
+                  <div className="pdf-annotation-swatches" aria-label="批注颜色">
+                    {ANNOTATION_COLORS.map((color) => (
+                      <button
+                        className={annotation.color.toLocaleLowerCase() === color ? 'active' : ''}
+                        key={color}
+                        type="button"
+                        style={{ '--swatch-color': color } as React.CSSProperties}
+                        title={`改为 ${color}`}
+                        aria-label={`将批注颜色改为 ${color}`}
+                        onClick={() => {
+                          void onUpdateAnnotation(annotation, color, annotation.comment).then((succeeded) => {
+                            if (succeeded) setAnnotationMenu(null)
+                          })
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <button
+                    className="annotation-menu-action"
+                    type="button"
+                    title="编辑批注评论"
+                    aria-label="编辑批注评论"
+                    onClick={() => {
+                      setAnnotationMenu(null)
+                      onRequestEditAnnotation(annotation)
+                    }}
+                  >
+                    <MessageSquareText size={13} />
+                  </button>
+                  <button
+                    className="annotation-menu-action danger"
+                    type="button"
+                    title="删除这条批注"
+                    aria-label={`删除${annotation.kind === 'highlight' ? '高亮' : '下划线'}`}
+                    onClick={() => {
+                      setAnnotationMenu(null)
+                      onRequestDeleteAnnotation(annotation)
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         </aside>
       ) : null}
+
+      {viewerContextMenu ? (
+        <ContextMenu
+          x={viewerContextMenu.x}
+          y={viewerContextMenu.y}
+          ariaLabel="PDF 阅读操作"
+          onClose={() => setViewerContextMenu(null)}
+          items={[
+            { id: 'zoom-in', label: '放大 PDF', icon: <ZoomIn size={14} />, onSelect: () => changeScale(scaleRef.current + 0.1) },
+            { id: 'zoom-out', label: '缩小 PDF', icon: <ZoomOut size={14} />, onSelect: () => changeScale(scaleRef.current - 0.1) },
+            { id: 'fit-width', label: '适合阅读区宽度', icon: <Maximize2 size={14} />, separatorBefore: true, onSelect: fitToWidth },
+            { id: 'find', label: '在文献中查找', icon: <Search size={14} />, onSelect: () => {
+              setSearchOpen(true)
+              window.setTimeout(() => searchInputRef.current?.focus(), 0)
+            } }
+          ]}
+        />
+      ) : null}
     </div>
   )
 }
+
+const ANNOTATION_COLORS = ['#e8bd55', '#7fa88b', '#6f9fb4', '#c97d77', '#a45f45', '#8b7eae']
 
 interface PdfPageViewProps {
   pageInfo: PageInfo

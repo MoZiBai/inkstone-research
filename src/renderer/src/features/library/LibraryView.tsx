@@ -14,6 +14,7 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type { ProjectCardView, WorkspaceSnapshot } from '@shared/types'
 import { BulkCardActions } from '../../components/BulkCardActions'
 import { CardEditDialog } from '../../components/CardEditDialog'
+import { ContextMenu } from '../../components/ContextMenu'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog } from '../../components/Modal'
 import { api } from '../../lib/api'
@@ -27,6 +28,7 @@ import type { RunMutation } from '../../types'
 interface LibraryViewProps {
   snapshot: WorkspaceSnapshot
   runMutation: RunMutation
+  currentReadingDocumentId: string | null
   onLocateSynthesis: (cardId: string, excluded: boolean) => void
   onOpenSource: (documentId: string, page: number | null, locatorJson: string) => void
 }
@@ -36,6 +38,7 @@ const libraryCardPreviewCount = 10
 export function LibraryView({
   snapshot,
   runMutation,
+  currentReadingDocumentId,
   onLocateSynthesis,
   onOpenSource
 }: LibraryViewProps): React.JSX.Element {
@@ -51,6 +54,11 @@ export function LibraryView({
     () => new Set()
   )
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
+  const [cardContextMenu, setCardContextMenu] = useState<{
+    x: number
+    y: number
+    card: ProjectCardView
+  } | null>(null)
 
   const filteredCards = useMemo(
     () => filterProjectCards(snapshot.cards, deferredQuery, stateFilter),
@@ -72,8 +80,13 @@ export function LibraryView({
           document,
           cards: cardsByDocument.get(document.id) ?? []
         }))
-        .filter((group) => group.cards.length > 0 || (!deferredQuery && stateFilter === 'all')),
-    [cardsByDocument, deferredQuery, snapshot.documents, stateFilter]
+        .filter((group) => group.cards.length > 0 || (!deferredQuery && stateFilter === 'all'))
+        .sort((first, second) => {
+          if (first.document.id === currentReadingDocumentId) return -1
+          if (second.document.id === currentReadingDocumentId) return 1
+          return first.document.sortOrder - second.document.sortOrder
+        }),
+    [cardsByDocument, currentReadingDocumentId, deferredQuery, snapshot.documents, stateFilter]
   )
 
   const cardStateCounts = useMemo(
@@ -210,6 +223,7 @@ export function LibraryView({
       <BulkCardActions
         snapshot={snapshot}
         selectedIds={selectedCardIds}
+        context="library"
         runMutation={runMutation}
         onClear={() => setSelectedCardIds(new Set())}
       />
@@ -223,7 +237,7 @@ export function LibraryView({
             : cards.slice(0, libraryCardPreviewCount)
           const hiddenCardCount = cards.length - visibleCards.length
           return (
-          <section className={`document-group ${collapsed ? 'collapsed' : ''}`} key={document.id}>
+          <section className={`document-group ${collapsed ? 'collapsed' : ''} ${document.id === currentReadingDocumentId ? 'current-reading-document' : ''}`} key={document.id}>
             <header className="document-group-header">
               <button
                 className="document-group-toggle"
@@ -247,6 +261,7 @@ export function LibraryView({
                   {document.isRemoved ? ' · 已从阅读列表移除（来源保留）' : ''}
                 </p>
               </div>
+              {document.id === currentReadingDocumentId ? <span className="current-reading-badge">正在阅读</span> : null}
               <span className="count-badge">{cards.length} 张卡片</span>
             </header>
 
@@ -256,7 +271,15 @@ export function LibraryView({
                   const category = card.categoryId ? categoryById.get(card.categoryId) : undefined
                   const excluded = card.synthesisState === 'excluded'
                   return (
-                    <article className={`library-card ${selectedCardIds.has(card.id) ? 'selected' : ''}`} key={card.id}>
+                    <article
+                      className={`library-card ${selectedCardIds.has(card.id) ? 'selected' : ''}`}
+                      key={card.id}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setCardContextMenu({ x: event.clientX, y: event.clientY, card })
+                      }}
+                    >
                       <label className="card-selection-checkbox" title="选择卡片进行批量操作">
                         <input
                           type="checkbox"
@@ -372,6 +395,50 @@ export function LibraryView({
           />
         ) : null}
       </div>
+
+      {cardContextMenu ? (
+        <ContextMenu
+          x={cardContextMenu.x}
+          y={cardContextMenu.y}
+          ariaLabel="卡片操作"
+          onClose={() => setCardContextMenu(null)}
+          items={[
+            {
+              id: 'source',
+              label: '查看 PDF 原文',
+              icon: <FileText size={14} />,
+              onSelect: () => onOpenSource(
+                cardContextMenu.card.documentId,
+                cardContextMenu.card.pdfPage,
+                cardContextMenu.card.locatorJson
+              )
+            },
+            {
+              id: 'synthesis',
+              label: cardContextMenu.card.synthesisState === 'excluded' ? '在已剔除中定位' : '在二次整理中定位',
+              icon: <ArrowUpRight size={14} />,
+              onSelect: () => onLocateSynthesis(
+                cardContextMenu.card.id,
+                cardContextMenu.card.synthesisState === 'excluded'
+              )
+            },
+            {
+              id: 'edit',
+              label: '编辑卡片',
+              icon: <Edit3 size={14} />,
+              onSelect: () => setEditingCard(cardContextMenu.card)
+            },
+            {
+              id: 'delete',
+              label: '永久删除卡片',
+              icon: <Trash2 size={14} />,
+              danger: true,
+              separatorBefore: true,
+              onSelect: () => setDeletingCard(cardContextMenu.card)
+            }
+          ]}
+        />
+      ) : null}
 
       {editingCard ? (
         <CardEditDialog

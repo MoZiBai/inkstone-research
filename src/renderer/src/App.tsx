@@ -14,6 +14,8 @@ import {
   Library,
   LoaderCircle,
   CircleX,
+  ClipboardPaste,
+  Copy,
   PanelLeftClose,
   PanelLeftOpen,
   PencilLine,
@@ -21,11 +23,13 @@ import {
   RefreshCw,
   Search,
   ScrollText,
+  Scissors,
   Settings2,
   ShieldCheck,
   Sparkles,
   Trash2,
   Type,
+  TextSelect,
   Upload
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
@@ -39,6 +43,7 @@ import type {
   WorkspaceSnapshot
 } from '@shared/types'
 import { ConfirmDialog, Modal } from './components/Modal'
+import { ContextMenu } from './components/ContextMenu'
 import { LibraryView } from './features/library/LibraryView'
 import { OutlineView } from './features/outline/OutlineView'
 import { ReadingView, type ReadingFocusRequest } from './features/reading/ReadingView'
@@ -95,12 +100,18 @@ export default function App(): React.JSX.Element {
   const [focusCardId, setFocusCardId] = useState<string | null>(null)
   const [synthesisMode, setSynthesisMode] = useState<'active' | 'excluded'>('active')
   const [readingRequest, setReadingRequest] = useState<ReadingFocusRequest | null>(null)
+  const [readingDocumentId, setReadingDocumentId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
   const [fontSize, setFontSize] = useState<FontSize>(loadFontSize)
   const [projectQuery, setProjectQuery] = useState('')
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('all')
   const [projectSort, setProjectSort] = useState<ProjectSort>('updated')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const [appContextMenu, setAppContextMenu] = useState<{
+    x: number
+    y: number
+    editable: HTMLInputElement | HTMLTextAreaElement | null
+  } | null>(null)
   const deferredProjectQuery = useDeferredValue(projectQuery)
   const deferredProjectSearchQuery = useDeferredValue(projectSearchQuery)
 
@@ -196,6 +207,7 @@ export default function App(): React.JSX.Element {
     if (projectId === snapshot?.currentProjectId || mutating) return
     setMutating(true)
     setReadingRequest(null)
+    setReadingDocumentId(null)
     await loadWorkspace(projectId)
     setMutating(false)
   }
@@ -413,7 +425,18 @@ export default function App(): React.JSX.Element {
   }
 
   return (
-    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <div
+      className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        const target = event.target
+        setAppContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+          editable: target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? target : null
+        })
+      }}
+    >
       <aside className="sidebar">
         <header className="brand">
           <span className="brand-seal">砚</span>
@@ -737,38 +760,70 @@ export default function App(): React.JSX.Element {
                 </button>
               </div>
             </div>
-          ) : activeView === 'reading' ? (
-            <ReadingView
-              snapshot={snapshot}
-              runMutation={runMutation}
-              notify={notify}
-              initialRequest={readingRequest}
-              onFocusHandled={() => setReadingRequest(null)}
-            />
-          ) : null}
-          {currentProject && activeView === 'library' ? (
-            <LibraryView
-              snapshot={snapshot}
-              runMutation={runMutation}
-              onLocateSynthesis={locateSynthesis}
-              onOpenSource={openSource}
-            />
-          ) : null}
-          {currentProject && activeView === 'synthesis' ? (
-            <SynthesisView
-              snapshot={snapshot}
-              runMutation={runMutation}
-              focusCardId={focusCardId}
-              initialMode={synthesisMode}
-              onFocusHandled={() => setFocusCardId(null)}
-              onOpenSource={openSource}
-            />
-          ) : null}
-          {currentProject && activeView === 'outline' ? (
-            <OutlineView snapshot={snapshot} runMutation={runMutation} onOpenSource={openSource} />
-          ) : null}
+          ) : (
+            <>
+              <div className={`view-pane ${activeView === 'reading' ? 'active' : ''}`} aria-hidden={activeView !== 'reading'}>
+                <ReadingView
+                  snapshot={snapshot}
+                  runMutation={runMutation}
+                  notify={notify}
+                  initialRequest={readingRequest}
+                  onFocusHandled={() => setReadingRequest(null)}
+                  onSelectedDocumentChange={setReadingDocumentId}
+                />
+              </div>
+              <div className={`view-pane ${activeView === 'library' ? 'active' : ''}`} aria-hidden={activeView !== 'library'}>
+                <LibraryView
+                  snapshot={snapshot}
+                  runMutation={runMutation}
+                  currentReadingDocumentId={readingDocumentId}
+                  onLocateSynthesis={locateSynthesis}
+                  onOpenSource={openSource}
+                />
+              </div>
+              <div className={`view-pane ${activeView === 'synthesis' ? 'active' : ''}`} aria-hidden={activeView !== 'synthesis'}>
+                <SynthesisView
+                  snapshot={snapshot}
+                  runMutation={runMutation}
+                  focusCardId={focusCardId}
+                  initialMode={synthesisMode}
+                  onFocusHandled={() => setFocusCardId(null)}
+                  onOpenSource={openSource}
+                />
+              </div>
+              <div className={`view-pane ${activeView === 'outline' ? 'active' : ''}`} aria-hidden={activeView !== 'outline'}>
+                <OutlineView snapshot={snapshot} runMutation={runMutation} onOpenSource={openSource} />
+              </div>
+            </>
+          )}
         </section>
       </main>
+
+      {appContextMenu ? (
+        <ContextMenu
+          x={appContextMenu.x}
+          y={appContextMenu.y}
+          ariaLabel={appContextMenu.editable ? '文字编辑操作' : '切换项目视图'}
+          onClose={() => setAppContextMenu(null)}
+          items={appContextMenu.editable
+            ? [
+                { id: 'cut', label: '剪切', icon: <Scissors size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'cut') },
+                { id: 'copy', label: '复制', icon: <Copy size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'copy') },
+                { id: 'paste', label: '粘贴', icon: <ClipboardPaste size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'paste') },
+                { id: 'select-all', label: '全选', icon: <TextSelect size={14} />, separatorBefore: true, onSelect: () => appContextMenu.editable?.select() }
+              ]
+            : tabs.map((tab) => {
+                const Icon = tab.icon
+                return {
+                  id: tab.id,
+                  label: `切换到${tab.label}`,
+                  icon: <Icon size={14} />,
+                  disabled: !currentProject || activeView === tab.id,
+                  onSelect: () => setActiveView(tab.id)
+                }
+              })}
+        />
+      ) : null}
 
       {projectDialogMode ? (
         <ProjectDialog
@@ -893,6 +948,15 @@ export default function App(): React.JSX.Element {
       {mutating ? <div className="mutation-line" /> : null}
     </div>
   )
+}
+
+function runEditingCommand(
+  target: HTMLInputElement | HTMLTextAreaElement | null,
+  command: 'cut' | 'copy' | 'paste'
+): void {
+  if (!target) return
+  target.focus()
+  document.execCommand(command)
 }
 
 interface DatabaseTransferDialogProps {

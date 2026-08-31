@@ -25,6 +25,7 @@ import type {
 } from '@shared/types'
 import { BulkCardActions } from '../../components/BulkCardActions'
 import { CardEditDialog } from '../../components/CardEditDialog'
+import { ContextMenu } from '../../components/ContextMenu'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
@@ -65,6 +66,11 @@ export function SynthesisView({
   const [showResearchRoleManager, setShowResearchRoleManager] = useState(false)
   const [query, setQuery] = useState('')
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
+  const [cardContextMenu, setCardContextMenu] = useState<{
+    x: number
+    y: number
+    card: ProjectCardView
+  } | null>(null)
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
   const activeCards = useMemo(
     () => snapshot.cards.filter((card) => card.synthesisState === 'active'),
@@ -118,7 +124,15 @@ export function SynthesisView({
     })
   }
 
-  useEffect(() => setMode(initialMode), [initialMode])
+  useEffect(() => {
+    setMode(initialMode)
+    setSelectedCardIds(new Set())
+  }, [initialMode])
+
+  const changeMode = (nextMode: 'active' | 'excluded'): void => {
+    setMode(nextMode)
+    setSelectedCardIds(new Set())
+  }
 
   useEffect(() => {
     if (!focusCardId) return
@@ -248,14 +262,14 @@ export function SynthesisView({
             <button
               className={mode === 'active' ? 'active' : ''}
               type="button"
-              onClick={() => setMode('active')}
+              onClick={() => changeMode('active')}
             >
               整理中 <span>{activeCards.length}</span>
             </button>
             <button
               className={mode === 'excluded' ? 'active' : ''}
               type="button"
-              onClick={() => setMode('excluded')}
+              onClick={() => changeMode('excluded')}
             >
               已剔除 <span>{excludedCards.length}</span>
             </button>
@@ -272,6 +286,7 @@ export function SynthesisView({
       <BulkCardActions
         snapshot={snapshot}
         selectedIds={selectedCardIds}
+        context={mode === 'active' ? 'synthesis-active' : 'synthesis-excluded'}
         runMutation={runMutation}
         onClear={() => setSelectedCardIds(new Set())}
       />
@@ -386,6 +401,11 @@ export function SynthesisView({
                           setDraggedCardId(null)
                           setDragOverCategory(null)
                         }}
+                        onContextMenu={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setCardContextMenu({ x: event.clientX, y: event.clientY, card })
+                        }}
                       >
                         <label className="card-selection-checkbox" title="选择卡片进行批量操作" onPointerDown={(event) => event.stopPropagation()}>
                           <input
@@ -485,6 +505,11 @@ export function SynthesisView({
                 className={`excluded-card ${selectedCardIds.has(card.id) ? 'selected' : ''}`}
                 key={card.id}
                 data-synthesis-card={card.id}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setCardContextMenu({ x: event.clientX, y: event.clientY, card })
+                }}
               >
                 <label className="card-selection-checkbox" title="选择卡片进行批量操作">
                   <input
@@ -532,6 +557,55 @@ export function SynthesisView({
           ) : null}
         </div>
       )}
+
+      {cardContextMenu ? (
+        <ContextMenu
+          x={cardContextMenu.x}
+          y={cardContextMenu.y}
+          ariaLabel="整理卡片操作"
+          onClose={() => setCardContextMenu(null)}
+          items={[
+            {
+              id: 'source',
+              label: '查看 PDF 原文',
+              icon: <Search size={14} />,
+              onSelect: () => onOpenSource(
+                cardContextMenu.card.documentId,
+                cardContextMenu.card.pdfPage,
+                cardContextMenu.card.locatorJson
+              )
+            },
+            {
+              id: 'edit',
+              label: '编辑卡片',
+              icon: <Edit3 size={14} />,
+              onSelect: () => setEditingCard(cardContextMenu.card)
+            },
+            cardContextMenu.card.synthesisState === 'excluded'
+              ? {
+                  id: 'restore',
+                  label: '恢复到二次整理',
+                  icon: <RotateCcw size={14} />,
+                  separatorBefore: true,
+                  onSelect: () => void runMutation(
+                    () => api.setCardExcluded(cardContextMenu.card.id, false),
+                    '卡片已恢复到二次整理。'
+                  )
+                }
+              : {
+                  id: 'exclude',
+                  label: '从二次整理剔除（不删除）',
+                  icon: <ArchiveX size={14} />,
+                  danger: true,
+                  separatorBefore: true,
+                  onSelect: () => void runMutation(
+                    () => api.setCardExcluded(cardContextMenu.card.id, true),
+                    '卡片已从二次整理剔除，仍保留在卡片库。'
+                  )
+                }
+          ]}
+        />
+      ) : null}
 
       {editingCard ? (
         <CardEditDialog
