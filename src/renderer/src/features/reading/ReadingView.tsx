@@ -583,6 +583,21 @@ export function ReadingView({
     if (succeeded) setEditingDocument(null)
   }
 
+  const saveDocumentPrintPageMapping = async (
+    pdfPageAnchor: number | null,
+    printPageAnchor: number | null
+  ): Promise<boolean> => {
+    if (!selectedDocument) return false
+    return runMutation(
+      () => api.updateDocumentPrintPageMapping({
+        documentId: selectedDocument.id,
+        pdfPageAnchor,
+        printPageAnchor
+      }),
+      pdfPageAnchor === null ? '文献印刷页映射已清除。' : '文献印刷页映射已保存。'
+    )
+  }
+
   const revealDocument = async (document: DocumentSummary | null = selectedDocument): Promise<void> => {
     if (!document?.filePath) return
     try {
@@ -673,7 +688,6 @@ export function ReadingView({
     displayText: string
     comment: string
     tags: string[]
-    printPage: string
   }): Promise<void> => {
     if (!pendingCard || !snapshot.currentProjectId || !selectedDocument) return
     const selection = pendingCard.selection
@@ -685,7 +699,6 @@ export function ReadingView({
           rawText: selection.text,
           displayText: input.displayText,
           pdfPage: selection.pageNumber,
-          printPage: input.printPage.trim() || null,
           locatorJson: JSON.stringify(selection.locator),
           contextBefore: selection.contextBefore,
           contextAfter: selection.contextAfter,
@@ -1121,6 +1134,11 @@ export function ReadingView({
                       <dd>{documentCards.length} 卡片 · {documentAnnotations.length} 批注 · {documentNotes.length} 思考</dd>
                     </div>
                   </dl>
+                  <PrintPageMappingEditor
+                    document={selectedDocument}
+                    currentPdfPage={currentPdfPage}
+                    onSave={saveDocumentPrintPageMapping}
+                  />
                   {selectedDocument.fileAvailable ? (
                     <div className="boundary-note">
                       <strong>当前能力边界</strong>
@@ -1489,6 +1507,7 @@ export function ReadingView({
         <CreateCardDialog
           selection={pendingCard.selection}
           initialComment={pendingCard.initialComment}
+          automaticPrintPage={mappedPrintPage(selectedDocument, pendingCard.selection.pageNumber)}
           availableTags={Array.from(new Set(snapshot.cards.flatMap((card) => card.tags))).sort()}
           onSave={saveCardFromSelection}
           onClose={() => setPendingCard(null)}
@@ -2238,17 +2257,130 @@ function ReadingNoteDialog({
   )
 }
 
+function PrintPageMappingEditor({
+  document,
+  currentPdfPage,
+  onSave
+}: {
+  document: DocumentSummary
+  currentPdfPage: number
+  onSave: (pdfPageAnchor: number | null, printPageAnchor: number | null) => Promise<boolean>
+}): React.JSX.Element {
+  const hasMapping = document.printPagePdfAnchor !== null && document.printPageNumberAnchor !== null
+  const [pdfPageAnchor, setPdfPageAnchor] = useState(
+    String(document.printPagePdfAnchor ?? currentPdfPage)
+  )
+  const [printPageAnchor, setPrintPageAnchor] = useState(
+    String(document.printPageNumberAnchor ?? 1)
+  )
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setPdfPageAnchor(String(document.printPagePdfAnchor ?? currentPdfPage))
+    setPrintPageAnchor(String(document.printPageNumberAnchor ?? 1))
+  }, [document.id, document.printPageNumberAnchor, document.printPagePdfAnchor])
+
+  const parsedPdfPage = Number(pdfPageAnchor)
+  const parsedPrintPage = Number(printPageAnchor)
+  const valid = Number.isInteger(parsedPdfPage) && parsedPdfPage >= 1 &&
+    Number.isInteger(parsedPrintPage) && parsedPrintPage >= 1
+
+  const submit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault()
+    if (!valid) return
+    setSaving(true)
+    try {
+      await onSave(parsedPdfPage, parsedPrintPage)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clear = async (): Promise<void> => {
+    setSaving(true)
+    try {
+      const succeeded = await onSave(null, null)
+      if (succeeded) {
+        setPdfPageAnchor(String(currentPdfPage))
+        setPrintPageAnchor('1')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <details className="print-page-mapping-editor">
+      <summary>
+        <span>印刷页映射</span>
+        <small>{hasMapping
+          ? `PDF ${document.printPagePdfAnchor} = 印刷 ${document.printPageNumberAnchor}`
+          : '未设置，仅在需要脚注页码时启用'}</small>
+      </summary>
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="print-page-anchor-fields">
+          <label>
+            <span>PDF 第</span>
+            <input
+              type="number"
+              min="1"
+              max="1000000"
+              value={pdfPageAnchor}
+              onChange={(event) => setPdfPageAnchor(event.target.value)}
+            />
+            <span>页</span>
+          </label>
+          <strong>=</strong>
+          <label>
+            <span>印刷第</span>
+            <input
+              type="number"
+              min="1"
+              max="1000000"
+              value={printPageAnchor}
+              onChange={(event) => setPrintPageAnchor(event.target.value)}
+            />
+            <span>页</span>
+          </label>
+        </div>
+        <p>保存后自动推算这篇文献的卡片页码；目录等前置页不会显示零或负数。</p>
+        <div className="print-page-mapping-actions">
+          <button className="button ghost compact" type="button" onClick={() => setPdfPageAnchor(String(currentPdfPage))}>
+            使用当前 PDF 页
+          </button>
+          {hasMapping ? (
+            <button className="button ghost compact" type="button" disabled={saving} onClick={() => void clear()}>
+              清除映射
+            </button>
+          ) : null}
+          <button className="button secondary compact" type="submit" disabled={saving || !valid}>
+            {saving ? '保存中…' : '保存映射'}
+          </button>
+        </div>
+      </form>
+    </details>
+  )
+}
+
 interface CreateCardDialogProps {
   selection: PdfSelection
   initialComment: string
+  automaticPrintPage: string | null
   availableTags: string[]
-  onSave: (input: { displayText: string; comment: string; tags: string[]; printPage: string }) => Promise<void>
+  onSave: (input: { displayText: string; comment: string; tags: string[] }) => Promise<void>
   onClose: () => void
+}
+
+function mappedPrintPage(document: DocumentSummary | null, pdfPage: number): string | null {
+  if (!document || document.printPagePdfAnchor === null || document.printPageNumberAnchor === null) return null
+  const mapped = document.printPageNumberAnchor + pdfPage - document.printPagePdfAnchor
+  return mapped >= 1 ? String(mapped) : null
 }
 
 function CreateCardDialog({
   selection,
   initialComment,
+  automaticPrintPage,
   availableTags,
   onSave,
   onClose
@@ -2256,7 +2388,6 @@ function CreateCardDialog({
   const [displayText, setDisplayText] = useState(selection.text)
   const [comment, setComment] = useState(initialComment)
   const [tags, setTags] = useState('')
-  const [printPage, setPrintPage] = useState('')
   const [saving, setSaving] = useState(false)
   const enteredTags = tags.split(/[、,，]/).map((tag) => tag.trim()).filter(Boolean)
   const tagQuery = tags.split(/[、,，]/).at(-1)?.trim().toLocaleLowerCase() ?? ''
@@ -2272,7 +2403,6 @@ function CreateCardDialog({
       await onSave({
         displayText,
         comment,
-        printPage,
         tags: tags
           .split(/[、,，]/)
           .map((tag) => tag.trim())
@@ -2292,8 +2422,7 @@ function CreateCardDialog({
       hasUnsavedChanges={
         displayText !== selection.text ||
         comment !== initialComment ||
-        tags.length > 0 ||
-        printPage.length > 0
+        tags.length > 0
       }
     >
       <form onSubmit={(event) => void submit(event)}>
@@ -2350,8 +2479,11 @@ function CreateCardDialog({
               <input value={`第 ${selection.pageNumber} 页 · 已保存原文坐标`} readOnly />
             </label>
             <label className="field">
-              <span>印刷页码（可选）</span>
-              <input value={printPage} onChange={(event) => setPrintPage(event.target.value)} placeholder="例如 103" />
+              <span>印刷页码</span>
+              <input
+                value={automaticPrintPage ? `第 ${automaticPrintPage} 页（自动）` : '文献尚未设置印刷页映射'}
+                readOnly
+              />
             </label>
           </div>
           {displayText !== selection.text ? (

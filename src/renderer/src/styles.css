@@ -2079,6 +2079,82 @@ body.reading-panel-resizing * {
   white-space: nowrap;
 }
 
+.print-page-mapping-editor {
+  margin-top: 9px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.print-page-mapping-editor > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  color: var(--ink-700);
+  font-size: calc(11px + var(--font-delta));
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.print-page-mapping-editor > summary small {
+  overflow: hidden;
+  color: var(--ink-500);
+  font-size: calc(10px + var(--font-delta));
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.print-page-mapping-editor > form {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.print-page-anchor-fields,
+.print-page-anchor-fields label,
+.print-page-mapping-actions {
+  display: flex;
+  align-items: center;
+}
+
+.print-page-anchor-fields {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.print-page-anchor-fields label {
+  gap: 4px;
+  color: var(--ink-600);
+  font-size: calc(11px + var(--font-delta));
+}
+
+.print-page-anchor-fields input {
+  width: 62px;
+  min-height: 29px;
+  padding: 0 6px;
+  color: var(--ink-800);
+  border: 1px solid var(--paper-300);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.print-page-mapping-editor p {
+  margin: 0;
+  color: var(--ink-500);
+  font-size: calc(10px + var(--font-delta));
+  line-height: 1.55;
+}
+
+.print-page-mapping-actions {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
 .boundary-note {
   display: grid;
   gap: 5px;

@@ -32,6 +32,8 @@ pub struct DocumentSummary {
     pub file_path: Option<String>,
     pub file_hash: Option<String>,
     pub file_available: bool,
+    pub print_page_pdf_anchor: Option<i64>,
+    pub print_page_number_anchor: Option<i64>,
     pub group_id: Option<String>,
     pub sort_order: i64,
     pub card_count: i64,
@@ -93,6 +95,7 @@ pub struct ProjectCardView {
     pub display_text: String,
     pub pdf_page: Option<i64>,
     pub print_page: Option<String>,
+    pub print_page_override: Option<String>,
     pub locator_json: String,
     pub context_before: String,
     pub context_after: String,
@@ -271,6 +274,14 @@ pub struct UpdateDocumentInput {
     pub publisher: String,
     #[serde(default)]
     pub metadata_raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDocumentPrintPageMappingInput {
+    pub document_id: String,
+    pub pdf_page_anchor: Option<i64>,
+    pub print_page_anchor: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,7 +501,7 @@ pub struct UpdateReadingNoteInput {
 pub struct UpdateCardInput {
     pub card_id: String,
     pub display_text: String,
-    pub print_page: Option<String>,
+    pub print_page_override: Option<String>,
     pub comment: String,
     #[serde(default)]
     pub research_role_ids: Vec<String>,

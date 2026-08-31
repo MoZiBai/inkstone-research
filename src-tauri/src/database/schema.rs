@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -351,6 +351,31 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+
+    if current_version < 10 {
+        connection.execute_batch(
+            r#"
+            ALTER TABLE documents ADD COLUMN print_page_pdf_anchor INTEGER
+              CHECK (print_page_pdf_anchor IS NULL OR print_page_pdf_anchor >= 1);
+            ALTER TABLE documents ADD COLUMN print_page_number_anchor INTEGER
+              CHECK (print_page_number_anchor IS NULL OR print_page_number_anchor >= 1);
+            ALTER TABLE project_cards ADD COLUMN print_page_override TEXT;
+
+            UPDATE project_cards
+            SET print_page_override = (
+              SELECT NULLIF(TRIM(se.print_page), '')
+              FROM source_excerpts se
+              WHERE se.id = project_cards.excerpt_id
+            )
+            WHERE EXISTS (
+              SELECT 1 FROM source_excerpts se
+              WHERE se.id = project_cards.excerpt_id
+                AND NULLIF(TRIM(se.print_page), '') IS NOT NULL
+            );
+            "#,
+        )?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -402,14 +427,15 @@ pub fn seed_database(connection: &mut Connection) -> Result<()> {
            '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z');
 
         INSERT INTO documents
-          (id, title, authors, year, file_path, file_hash, created_at, updated_at)
+          (id, title, authors, year, file_path, file_hash, created_at, updated_at,
+           print_page_pdf_anchor, print_page_number_anchor)
         VALUES
           ('seed-document-space', '从墓葬空间看社会关系的形成', '陈明远', 2022, NULL, NULL,
-           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', 17, 103),
           ('seed-document-ritual', '仪式、记忆与墓地的空间秩序', '林秋', 2019, NULL, NULL,
-           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z'),
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', 9, 57),
           ('seed-document-region', '区域互动与物质文化传播路径', '周宁', 2021, NULL, NULL,
-           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z');
+           '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', 12, 88);
 
         INSERT INTO project_documents (project_id, document_id, sort_order, created_at)
         VALUES
@@ -596,8 +622,16 @@ mod tests {
                 CREATE TABLE project_cards (
                   id TEXT PRIMARY KEY,
                   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                  excerpt_id TEXT NOT NULL,
                   role TEXT NOT NULL,
                   created_at TEXT NOT NULL
+                );
+                CREATE TABLE documents (
+                  id TEXT PRIMARY KEY
+                );
+                CREATE TABLE source_excerpts (
+                  id TEXT PRIMARY KEY,
+                  print_page TEXT
                 );
                 CREATE TABLE project_documents (
                   project_id TEXT NOT NULL,
@@ -608,8 +642,8 @@ mod tests {
                   PRIMARY KEY (project_id, document_id)
                 );
                 INSERT INTO projects VALUES ('project-old', '2025-01-01', '2025-01-02');
-                INSERT INTO project_cards VALUES ('card-support', 'project-old', 'support', '2025-01-03');
-                INSERT INTO project_cards VALUES ('card-unset', 'project-old', 'unset', '2025-01-04');
+                INSERT INTO project_cards VALUES ('card-support', 'project-old', 'excerpt-support', 'support', '2025-01-03');
+                INSERT INTO project_cards VALUES ('card-unset', 'project-old', 'excerpt-unset', 'unset', '2025-01-04');
                 PRAGMA user_version = 6;
                 "#,
             )
@@ -672,6 +706,9 @@ mod tests {
                 ALTER TABLE project_documents DROP COLUMN group_id;
                 DROP TABLE document_groups;
                 DROP TABLE backup_records;
+                ALTER TABLE documents DROP COLUMN print_page_pdf_anchor;
+                ALTER TABLE documents DROP COLUMN print_page_number_anchor;
+                ALTER TABLE project_cards DROP COLUMN print_page_override;
                 PRAGMA user_version = 7;
                 "#,
             )
@@ -703,6 +740,9 @@ mod tests {
                 DROP INDEX idx_project_documents_group;
                 ALTER TABLE project_documents DROP COLUMN group_id;
                 DROP TABLE document_groups;
+                ALTER TABLE documents DROP COLUMN print_page_pdf_anchor;
+                ALTER TABLE documents DROP COLUMN print_page_number_anchor;
+                ALTER TABLE project_cards DROP COLUMN print_page_override;
                 PRAGMA user_version = 8;
                 "#,
             )
@@ -730,5 +770,67 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(group_table_exists, 1);
         assert_eq!(group_column_exists, 1);
+    }
+
+    #[test]
+    fn version_nine_database_adds_print_page_mapping_and_preserves_overrides() {
+        let mut connection = Connection::open_in_memory().expect("memory database");
+        migrate_database(&mut connection).expect("create current schema");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO projects
+                  (id, name, description, color, sort_order, created_at, updated_at)
+                VALUES ('project-print', '页码测试', '', '#9a5d45', 1000, 'now', 'now');
+                INSERT INTO documents
+                  (id, title, authors, year, file_path, file_hash, created_at, updated_at)
+                VALUES ('document-print', '测试文献', '', NULL, NULL, NULL, 'now', 'now');
+                INSERT INTO source_excerpts
+                  (id, document_id, raw_text, clean_text, pdf_page, print_page, locator_json,
+                   context_before, context_after, source_hash, created_at)
+                VALUES ('excerpt-print', 'document-print', '原文', '原文', 7, '103', '{}', '', '', NULL, 'now');
+                INSERT INTO synthesis_categories
+                  (id, project_id, name, color, sort_order, is_default, created_at, updated_at)
+                VALUES ('category-print', 'project-print', '待归类', '#999999', 1000, 1, 'now', 'now');
+                INSERT INTO project_cards
+                  (id, project_id, excerpt_id, comment, role, category_id, synthesis_state,
+                   created_at, updated_at, text_override, origin_kind)
+                VALUES ('card-print', 'project-print', 'excerpt-print', '', 'unset',
+                        'category-print', 'active', 'now', 'now', '', 'normal');
+
+                ALTER TABLE documents DROP COLUMN print_page_pdf_anchor;
+                ALTER TABLE documents DROP COLUMN print_page_number_anchor;
+                ALTER TABLE project_cards DROP COLUMN print_page_override;
+                PRAGMA user_version = 9;
+                "#,
+            )
+            .expect("version nine fixture");
+
+        migrate_database(&mut connection).expect("migrate version nine database");
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let override_value: Option<String> = connection
+            .query_row(
+                "SELECT print_page_override FROM project_cards WHERE id = 'card-print'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated print page override");
+        let document_columns: i64 = connection
+            .query_row(
+                r#"
+                SELECT COUNT(*) FROM pragma_table_info('documents')
+                WHERE name IN ('print_page_pdf_anchor', 'print_page_number_anchor')
+                "#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("document print page columns");
+
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(override_value.as_deref(), Some("103"));
+        assert_eq!(document_columns, 2);
     }
 }

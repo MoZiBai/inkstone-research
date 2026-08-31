@@ -23,6 +23,7 @@ import type {
   UpdateCardInput,
   UpdateCategoryInput,
   UpdateDocumentInput,
+  UpdateDocumentPrintPageMappingInput,
   UpdateDocumentGroupInput,
   UpdateOutlineCardLinkInput,
   UpdateOutlineNodeInput,
@@ -49,6 +50,8 @@ export const api: InkstoneApi = {
     invoke<string>('create_document', { input }),
   updateDocument: (input: UpdateDocumentInput) =>
     invoke<void>('update_document', { input }),
+  updateDocumentPrintPageMapping: (input: UpdateDocumentPrintPageMappingInput) =>
+    invoke<void>('update_document_print_page_mapping', { input }),
   removeDocument: (input: RemoveDocumentInput) =>
     invoke<void>('remove_document', { input }),
   restoreDocument: (projectId: string, documentId: string) =>

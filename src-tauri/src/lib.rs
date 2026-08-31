@@ -38,6 +38,7 @@ pub fn run() {
             commands::remove_project,
             commands::create_document,
             commands::update_document,
+            commands::update_document_print_page_mapping,
             commands::remove_document,
             commands::restore_document,
             commands::create_document_group,

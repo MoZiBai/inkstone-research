@@ -18,9 +18,9 @@ use crate::models::{
     MoveOutlineNodeInput, OutlineCardLink, OutlineNode, OutlinePlacement, PdfAnnotation,
     ProjectCardView, ProjectSummary, ReadingNote, RemoveDocumentInput, ResearchRole,
     SynthesisCategory, UpdateCardInput, UpdateCategoryInput, UpdateDocumentGroupInput,
-    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
-    UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
-    WorkspaceSnapshot,
+    UpdateDocumentInput, UpdateDocumentPrintPageMappingInput, UpdateOutlineCardLinkInput,
+    UpdateOutlineNodeInput, UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput,
+    UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 
 use super::schema::{migrate_database, seed_database, SCHEMA_VERSION};
@@ -103,7 +103,9 @@ impl Repository {
                 r#"
                 SELECT d.id, d.title, d.authors, d.year,
                        d.journal, d.volume, d.issue, d.pages, d.doi, d.publisher, d.metadata_raw,
-                       pd.removed_at IS NOT NULL, d.file_path, d.file_hash, pd.group_id, pd.sort_order,
+                       pd.removed_at IS NOT NULL, d.file_path, d.file_hash,
+                       d.print_page_pdf_anchor, d.print_page_number_anchor,
+                       pd.group_id, pd.sort_order,
                        COUNT(pc.id) AS card_count,
                        d.created_at, d.updated_at
                 FROM project_documents pd
@@ -133,11 +135,13 @@ impl Repository {
                     file_path: row.get(12)?,
                     file_hash: row.get(13)?,
                     file_available: false,
-                    group_id: row.get(14)?,
-                    sort_order: row.get(15)?,
-                    card_count: row.get(16)?,
-                    created_at: row.get(17)?,
-                    updated_at: row.get(18)?,
+                    print_page_pdf_anchor: row.get(14)?,
+                    print_page_number_anchor: row.get(15)?,
+                    group_id: row.get(16)?,
+                    sort_order: row.get(17)?,
+                    card_count: row.get(18)?,
+                    created_at: row.get(19)?,
+                    updated_at: row.get(20)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -212,7 +216,18 @@ impl Repository {
                        d.id, d.title, d.authors, d.year,
                        se.raw_text, se.clean_text,
                        COALESCE(NULLIF(pc.text_override, ''), se.clean_text),
-                       se.pdf_page, se.print_page,
+                       se.pdf_page,
+                       CASE
+                         WHEN NULLIF(TRIM(pc.print_page_override), '') IS NOT NULL
+                           THEN TRIM(pc.print_page_override)
+                         WHEN d.print_page_pdf_anchor IS NOT NULL
+                          AND d.print_page_number_anchor IS NOT NULL
+                          AND se.pdf_page IS NOT NULL
+                          AND d.print_page_number_anchor + se.pdf_page - d.print_page_pdf_anchor >= 1
+                           THEN CAST(d.print_page_number_anchor + se.pdf_page - d.print_page_pdf_anchor AS TEXT)
+                         ELSE NULL
+                       END,
+                       NULLIF(TRIM(pc.print_page_override), ''),
                        se.locator_json, se.context_before, se.context_after, se.source_hash,
                        pc.comment, pc.origin_kind, pc.category_id, pc.synthesis_state,
                        COALESCE(GROUP_CONCAT(t.name, char(31)), ''),
@@ -228,7 +243,7 @@ impl Repository {
                 "#,
             )?;
             let rows = statement.query_map(params![project_id], |row| {
-                let tags_value: String = row.get(20)?;
+                let tags_value: String = row.get(21)?;
                 let tags = if tags_value.is_empty() {
                     Vec::new()
                 } else {
@@ -247,18 +262,19 @@ impl Repository {
                     display_text: row.get(9)?,
                     pdf_page: row.get(10)?,
                     print_page: row.get(11)?,
-                    locator_json: row.get(12)?,
-                    context_before: row.get(13)?,
-                    context_after: row.get(14)?,
-                    source_hash: row.get(15)?,
-                    comment: row.get(16)?,
-                    origin_kind: row.get(17)?,
+                    print_page_override: row.get(12)?,
+                    locator_json: row.get(13)?,
+                    context_before: row.get(14)?,
+                    context_after: row.get(15)?,
+                    source_hash: row.get(16)?,
+                    comment: row.get(17)?,
+                    origin_kind: row.get(18)?,
                     research_roles: Vec::new(),
-                    category_id: row.get(18)?,
-                    synthesis_state: row.get(19)?,
+                    category_id: row.get(19)?,
+                    synthesis_state: row.get(20)?,
                     tags,
-                    created_at: row.get(21)?,
-                    updated_at: row.get(22)?,
+                    created_at: row.get(22)?,
+                    updated_at: row.get(23)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -632,6 +648,48 @@ impl Repository {
                 metadata.doi,
                 metadata.publisher,
                 metadata.metadata_raw,
+                timestamp(),
+                input.document_id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("文献".into()));
+        }
+        Ok(())
+    }
+
+    pub fn update_document_print_page_mapping(
+        &mut self,
+        input: UpdateDocumentPrintPageMappingInput,
+    ) -> AppResult<()> {
+        let anchors_are_paired =
+            input.pdf_page_anchor.is_some() == input.print_page_anchor.is_some();
+        if !anchors_are_paired {
+            return Err(AppError::Validation(
+                "PDF 页与印刷页锚点必须同时设置或同时清除。".into(),
+            ));
+        }
+        if input
+            .pdf_page_anchor
+            .is_some_and(|page| !(1..=1_000_000).contains(&page))
+            || input
+                .print_page_anchor
+                .is_some_and(|page| !(1..=1_000_000).contains(&page))
+        {
+            return Err(AppError::Validation(
+                "页码锚点必须是 1 到 1000000 之间的整数。".into(),
+            ));
+        }
+
+        let changed = self.connection.execute(
+            r#"
+            UPDATE documents
+            SET print_page_pdf_anchor = ?1, print_page_number_anchor = ?2, updated_at = ?3
+            WHERE id = ?4
+            "#,
+            params![
+                input.pdf_page_anchor,
+                input.print_page_anchor,
                 timestamp(),
                 input.document_id
             ],
@@ -1723,6 +1781,12 @@ impl Repository {
         let display_text = required_long_text(&input.display_text, "卡片摘录文字", 50_000)?;
         validate_locator(&input.locator_json, input.pdf_page)?;
         let normalized_tags = normalize_tags(&input.tags)?;
+        let print_page_override = input
+            .print_page
+            .as_deref()
+            .map(|value| limited_text(value, "印刷页码", 80))
+            .transpose()?
+            .filter(|value| !value.is_empty());
         ensure_project_document(&self.connection, &input.project_id, &input.document_id)?;
 
         let source_hash: Option<String> = self.connection.query_row(
@@ -1795,7 +1859,7 @@ impl Repository {
                     input.document_id,
                     input.raw_text,
                     input.pdf_page,
-                    input.print_page.as_deref().map(str::trim),
+                    Option::<String>::None,
                     input.locator_json,
                     input.context_before.trim(),
                     input.context_after.trim(),
@@ -1849,15 +1913,16 @@ impl Repository {
         transaction.execute(
             r#"
             INSERT INTO project_cards
-              (id, project_id, excerpt_id, text_override, comment, category_id,
-               synthesis_state, origin_kind, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8)
+              (id, project_id, excerpt_id, text_override, print_page_override, comment,
+               category_id, synthesis_state, origin_kind, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9, ?9)
             "#,
             params![
                 card_id,
                 input.project_id,
                 excerpt_id,
                 text_override,
+                print_page_override,
                 input.comment.trim(),
                 category_id,
                 origin_kind,
@@ -2025,8 +2090,8 @@ impl Repository {
                 "单张卡片最多使用 24 个研究作用。".into(),
             ));
         }
-        let print_page = input
-            .print_page
+        let print_page_override = input
+            .print_page_override
             .as_deref()
             .map(|value| limited_text(value, "印刷页码", 80))
             .transpose()?
@@ -2034,16 +2099,16 @@ impl Repository {
 
         let now = timestamp();
         let transaction = self.connection.transaction()?;
-        let (project_id, excerpt_id, clean_text): (String, String, String) = transaction
+        let (project_id, clean_text): (String, String) = transaction
             .query_row(
                 r#"
-                SELECT pc.project_id, pc.excerpt_id, se.clean_text
+                SELECT pc.project_id, se.clean_text
                 FROM project_cards pc
                 JOIN source_excerpts se ON se.id = pc.excerpt_id
                 WHERE pc.id = ?1
                 "#,
                 params![input.card_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| AppError::NotFound("卡片".into()))?;
@@ -2065,12 +2130,14 @@ impl Repository {
             display_text.as_str()
         };
         transaction.execute(
-            "UPDATE project_cards SET text_override = ?1, comment = ?2, updated_at = ?3 WHERE id = ?4",
-            params![text_override, input.comment.trim(), now, input.card_id],
-        )?;
-        transaction.execute(
-            "UPDATE source_excerpts SET print_page = ?1 WHERE id = ?2",
-            params![print_page, excerpt_id],
+            "UPDATE project_cards SET text_override = ?1, print_page_override = ?2, comment = ?3, updated_at = ?4 WHERE id = ?5",
+            params![
+                text_override,
+                print_page_override,
+                input.comment.trim(),
+                now,
+                input.card_id
+            ],
         )?;
         transaction.execute(
             "DELETE FROM project_card_tags WHERE project_card_id = ?1",
@@ -2893,7 +2960,7 @@ const IMPORT_TABLES: &[ImportTableSpec] = &[
     ImportTableSpec {
         table: "documents",
         identity: "d.id IS s.id",
-        columns: &["id", "title", "authors", "year", "file_path", "file_hash", "created_at", "updated_at", "journal", "volume", "issue", "pages", "doi", "publisher", "metadata_raw"],
+        columns: &["id", "title", "authors", "year", "file_path", "file_hash", "created_at", "updated_at", "journal", "volume", "issue", "pages", "doi", "publisher", "metadata_raw", "print_page_pdf_anchor", "print_page_number_anchor"],
     },
     ImportTableSpec {
         table: "document_groups",
@@ -2923,7 +2990,7 @@ const IMPORT_TABLES: &[ImportTableSpec] = &[
     ImportTableSpec {
         table: "project_cards",
         identity: "d.id IS s.id OR (d.project_id IS s.project_id AND d.excerpt_id IS s.excerpt_id)",
-        columns: &["id", "project_id", "excerpt_id", "text_override", "comment", "role", "category_id", "synthesis_state", "origin_kind", "created_at", "updated_at"],
+        columns: &["id", "project_id", "excerpt_id", "text_override", "print_page_override", "comment", "role", "category_id", "synthesis_state", "origin_kind", "created_at", "updated_at"],
     },
     ImportTableSpec {
         table: "tags",
@@ -3058,9 +3125,11 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
 
             INSERT OR IGNORE INTO documents
               (id, title, authors, year, file_path, file_hash, created_at, updated_at,
-               journal, volume, issue, pages, doi, publisher, metadata_raw)
+               journal, volume, issue, pages, doi, publisher, metadata_raw,
+               print_page_pdf_anchor, print_page_number_anchor)
             SELECT id, title, authors, year, file_path, file_hash, created_at, updated_at,
-                   journal, volume, issue, pages, doi, publisher, metadata_raw
+                   journal, volume, issue, pages, doi, publisher, metadata_raw,
+                   print_page_pdf_anchor, print_page_number_anchor
             FROM import_db.documents;
 
             INSERT OR IGNORE INTO document_groups
@@ -3097,9 +3166,10 @@ fn merge_database_copy(destination: &mut Connection, source: &Path) -> AppResult
             FROM import_db.research_roles;
 
             INSERT OR IGNORE INTO project_cards
-              (id, project_id, excerpt_id, text_override, comment, role, category_id,
-               synthesis_state, origin_kind, created_at, updated_at)
-            SELECT pc.id, pc.project_id, pc.excerpt_id, pc.text_override, pc.comment, pc.role,
+              (id, project_id, excerpt_id, text_override, print_page_override, comment, role,
+               category_id, synthesis_state, origin_kind, created_at, updated_at)
+            SELECT pc.id, pc.project_id, pc.excerpt_id, pc.text_override,
+                   pc.print_page_override, pc.comment, pc.role,
                    CASE
                      WHEN pc.category_id IS NULL THEN NULL
                      WHEN EXISTS(
@@ -4716,7 +4786,7 @@ mod tests {
                 card_id: "seed-card-4".into(),
                 display_text: "重复举行的纪念活动使墓地空间获得了超出单次埋葬行为的社会记忆。"
                     .into(),
-                print_page: Some("57".into()),
+                print_page_override: Some("57".into()),
                 comment: "更新后的项目评论".into(),
                 research_role_ids: vec![oppose_role_id],
                 tags: vec!["仪式".into(), "空间".into()],
@@ -4800,7 +4870,7 @@ mod tests {
             .update_card(UpdateCardInput {
                 card_id: "seed-card-1".into(),
                 display_text: "人工校正后的卡片显示文字".into(),
-                print_page: Some("103a".into()),
+                print_page_override: Some("103a".into()),
                 comment: "新的即时笔记".into(),
                 research_role_ids: vec![support_role_id, custom_role_id.clone()],
                 tags: vec!["空间".into()],
@@ -4829,7 +4899,65 @@ mod tests {
         assert_eq!(card.display_text, "人工校正后的卡片显示文字");
         assert_ne!(card.raw_text, card.display_text);
         assert_eq!(card.print_page.as_deref(), Some("103a"));
+        assert_eq!(card.print_page_override.as_deref(), Some("103a"));
         assert_eq!(card.comment, "新的即时笔记");
+    }
+
+    #[test]
+    fn document_print_page_mapping_recalculates_cards_without_overrides() {
+        let mut repository = Repository::memory().expect("memory database");
+        let initial = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("initial workspace");
+        let initial_card = initial
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("seed card");
+        assert_eq!(initial_card.print_page.as_deref(), Some("103"));
+        assert!(initial_card.print_page_override.is_none());
+
+        repository
+            .update_document_print_page_mapping(UpdateDocumentPrintPageMappingInput {
+                document_id: "seed-document-space".into(),
+                pdf_page_anchor: Some(7),
+                print_page_anchor: Some(1),
+            })
+            .expect("update document page mapping");
+        let recalculated = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after mapping update");
+        let recalculated_card = recalculated
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("recalculated seed card");
+        assert_eq!(recalculated_card.print_page.as_deref(), Some("11"));
+
+        repository
+            .update_document_print_page_mapping(UpdateDocumentPrintPageMappingInput {
+                document_id: "seed-document-space".into(),
+                pdf_page_anchor: None,
+                print_page_anchor: None,
+            })
+            .expect("clear document page mapping");
+        let cleared = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after clearing mapping");
+        assert!(cleared
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("card after clearing mapping")
+            .print_page
+            .is_none());
+        assert!(repository
+            .update_document_print_page_mapping(UpdateDocumentPrintPageMappingInput {
+                document_id: "seed-document-space".into(),
+                pdf_page_anchor: Some(7),
+                print_page_anchor: None,
+            })
+            .is_err());
     }
 
     #[test]

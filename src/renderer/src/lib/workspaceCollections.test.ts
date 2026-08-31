@@ -21,6 +21,7 @@ function card(id: string, documentId: string, state: 'active' | 'excluded' = 'ac
     displayText: id === 'card-a' ? '人工修正的空间论述' : `摘录 ${id}`,
     pdfPage: 1,
     printPage: null,
+    printPageOverride: null,
     locatorJson: '{"page":1,"rects":[]}',
     contextBefore: '',
     contextAfter: '',

@@ -32,6 +32,8 @@ export interface DocumentSummary {
   filePath: string | null
   fileHash: string | null
   fileAvailable: boolean
+  printPagePdfAnchor: number | null
+  printPageNumberAnchor: number | null
   groupId: string | null
   sortOrder: number
   cardCount: number
@@ -85,6 +87,7 @@ export interface ProjectCardView {
   displayText: string
   pdfPage: number | null
   printPage: string | null
+  printPageOverride: string | null
   locatorJson: string
   contextBefore: string
   contextAfter: string
@@ -211,6 +214,12 @@ export interface ImportPdfInput extends BibliographicMetadataInput {
 
 export interface UpdateDocumentInput extends BibliographicMetadataInput {
   documentId: string
+}
+
+export interface UpdateDocumentPrintPageMappingInput {
+  documentId: string
+  pdfPageAnchor: number | null
+  printPageAnchor: number | null
 }
 
 export interface RemoveDocumentInput {
@@ -374,7 +383,7 @@ export interface UpdateReadingNoteInput {
 export interface UpdateCardInput {
   cardId: string
   displayText: string
-  printPage?: string | null
+  printPageOverride?: string | null
   comment: string
   researchRoleIds: string[]
   tags: string[]
@@ -446,6 +455,7 @@ export interface InkstoneApi {
   exportProjectDatabase: (projectId: string, destinationPath: string) => Promise<string>
   createDocument: (input: CreateDocumentInput) => Promise<string>
   updateDocument: (input: UpdateDocumentInput) => Promise<void>
+  updateDocumentPrintPageMapping: (input: UpdateDocumentPrintPageMappingInput) => Promise<void>
   removeDocument: (input: RemoveDocumentInput) => Promise<void>
   restoreDocument: (projectId: string, documentId: string) => Promise<void>
   createDocumentGroup: (input: CreateDocumentGroupInput) => Promise<string>

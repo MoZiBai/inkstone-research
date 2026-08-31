@@ -17,9 +17,9 @@ use crate::models::{
     CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview, DatabaseImportResult,
     ImportPdfInput, ImportPdfResult, MoveDocumentToGroupInput, MoveOutlineNodeInput,
     RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentGroupInput, UpdateDocumentInput, UpdateOutlineCardLinkInput,
-    UpdateOutlineNodeInput, UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput,
-    UpdateResearchRoleInput, WorkspaceSnapshot,
+    UpdateDocumentGroupInput, UpdateDocumentInput, UpdateDocumentPrintPageMappingInput,
+    UpdateOutlineCardLinkInput, UpdateOutlineNodeInput, UpdatePdfAnnotationInput,
+    UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -237,6 +237,14 @@ pub fn create_document(
 #[tauri::command]
 pub fn update_document(input: UpdateDocumentInput, state: State<'_, AppState>) -> AppResult<()> {
     state.lock()?.update_document(input)
+}
+
+#[tauri::command]
+pub fn update_document_print_page_mapping(
+    input: UpdateDocumentPrintPageMappingInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_document_print_page_mapping(input)
 }
 
 #[tauri::command]

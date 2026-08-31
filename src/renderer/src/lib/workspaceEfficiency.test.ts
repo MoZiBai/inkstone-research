@@ -13,14 +13,14 @@ const projects: ProjectSummary[] = [
 ]
 
 const documents: DocumentSummary[] = [
-  { id: 'd1', title: '礼制研究', authors: '王明', year: 2020, journal: '考古', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/a.pdf', fileHash: 'a', fileAvailable: true, groupId: null, sortOrder: 1000, cardCount: 2, createdAt: '2024-01-01', updatedAt: '2024-02-01' },
-  { id: 'd2', title: '墓葬材料', authors: '', year: null, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/b.pdf', fileHash: 'b', fileAvailable: false, groupId: null, sortOrder: 2000, cardCount: 0, createdAt: '2024-01-02', updatedAt: '2024-03-01' },
-  { id: 'd3', title: '未连接文献', authors: '李华', year: 2024, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: null, fileHash: null, fileAvailable: false, groupId: null, sortOrder: 3000, cardCount: 1, createdAt: '2024-01-03', updatedAt: '2024-01-03' }
+  { id: 'd1', title: '礼制研究', authors: '王明', year: 2020, journal: '考古', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/a.pdf', fileHash: 'a', fileAvailable: true, printPagePdfAnchor: null, printPageNumberAnchor: null, groupId: null, sortOrder: 1000, cardCount: 2, createdAt: '2024-01-01', updatedAt: '2024-02-01' },
+  { id: 'd2', title: '墓葬材料', authors: '', year: null, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: 'managed/b.pdf', fileHash: 'b', fileAvailable: false, printPagePdfAnchor: null, printPageNumberAnchor: null, groupId: null, sortOrder: 2000, cardCount: 0, createdAt: '2024-01-02', updatedAt: '2024-03-01' },
+  { id: 'd3', title: '未连接文献', authors: '李华', year: 2024, journal: '', volume: '', issue: '', pages: '', doi: '', publisher: '', metadataRaw: '', isRemoved: false, filePath: null, fileHash: null, fileAvailable: false, printPagePdfAnchor: null, printPageNumberAnchor: null, groupId: null, sortOrder: 3000, cardCount: 1, createdAt: '2024-01-03', updatedAt: '2024-01-03' }
 ]
 
 const card: ProjectCardView = {
   id: 'c1', projectId: 'p1', excerptId: 'e1', documentId: 'd1', documentTitle: '礼制研究', documentAuthors: '王明', documentYear: 2020,
-  rawText: '原文', cleanText: '原文', displayText: '器物组合反映等级秩序', pdfPage: 2, printPage: null, locatorJson: '{}', contextBefore: '', contextAfter: '', sourceHash: 'a', comment: '需要与墓葬年代对照', originKind: 'normal', researchRoles: [], categoryId: null, synthesisState: 'active', tags: ['礼制'], createdAt: '2024-01-01', updatedAt: '2024-02-02'
+  rawText: '原文', cleanText: '原文', displayText: '器物组合反映等级秩序', pdfPage: 2, printPage: null, printPageOverride: null, locatorJson: '{}', contextBefore: '', contextAfter: '', sourceHash: 'a', comment: '需要与墓葬年代对照', originKind: 'normal', researchRoles: [], categoryId: null, synthesisState: 'active', tags: ['礼制'], createdAt: '2024-01-01', updatedAt: '2024-02-02'
 }
 
 it('filters and sorts projects without mutating the source order', () => {

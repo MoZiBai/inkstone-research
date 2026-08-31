@@ -26,7 +26,7 @@ export function CardEditDialog({
   onOpenSource
 }: CardEditDialogProps): React.JSX.Element {
   const [displayText, setDisplayText] = useState(card.displayText)
-  const [printPage, setPrintPage] = useState(card.printPage ?? '')
+  const [printPageOverride, setPrintPageOverride] = useState(card.printPageOverride ?? '')
   const [comment, setComment] = useState(card.comment)
   const [selectedRoleIds, setSelectedRoleIds] = useState<Set<string>>(
     () => new Set(card.researchRoles.map((role) => role.id))
@@ -35,7 +35,7 @@ export function CardEditDialog({
 
   useEffect(() => {
     setDisplayText(card.displayText)
-    setPrintPage(card.printPage ?? '')
+    setPrintPageOverride(card.printPageOverride ?? '')
     setComment(card.comment)
     setSelectedRoleIds(new Set(card.researchRoles.map((role) => role.id)))
     setTags(card.tags.join('、'))
@@ -47,7 +47,7 @@ export function CardEditDialog({
   )
   const hasUnsavedChanges =
     displayText !== card.displayText ||
-    printPage !== (card.printPage ?? '') ||
+    printPageOverride !== (card.printPageOverride ?? '') ||
     comment !== card.comment ||
     tags !== card.tags.join('、') ||
     Array.from(selectedRoleIds).sort().join('\u0000') !==
@@ -58,7 +58,7 @@ export function CardEditDialog({
     await onSave({
       cardId: card.id,
       displayText,
-      printPage,
+      printPageOverride,
       comment,
       researchRoleIds: Array.from(selectedRoleIds),
       tags: tags
@@ -106,12 +106,19 @@ export function CardEditDialog({
             <input value={tags} onChange={(event) => setTags(event.target.value)} />
           </label>
           <label className="field">
-            <span>印刷页码（可选）</span>
+            <span>单卡印刷页覆盖 <small>留空则使用文献映射</small></span>
             <input
-              value={printPage}
-              onChange={(event) => setPrintPage(event.target.value)}
-              placeholder="例如 103"
+              value={printPageOverride}
+              onChange={(event) => setPrintPageOverride(event.target.value)}
+              placeholder={card.printPage && !card.printPageOverride ? `自动计算为 ${card.printPage}` : '例如 103 或 103a'}
             />
+            <small>
+              {card.printPageOverride
+                ? '当前显示使用单卡覆盖；清空并保存可恢复自动计算。'
+                : card.printPage
+                  ? `当前按文献映射自动计算为第 ${card.printPage} 页。`
+                  : '当前文献尚未设置印刷页映射。'}
+            </small>
           </label>
         </div>
         <fieldset className="research-role-picker">
