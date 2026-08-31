@@ -45,6 +45,13 @@ export function CardEditDialog({
     () => researchRoles.filter((role) => !role.isArchived || selectedRoleIds.has(role.id)),
     [researchRoles, selectedRoleIds]
   )
+  const hasUnsavedChanges =
+    displayText !== card.displayText ||
+    printPage !== (card.printPage ?? '') ||
+    comment !== card.comment ||
+    tags !== card.tags.join('、') ||
+    Array.from(selectedRoleIds).sort().join('\u0000') !==
+      card.researchRoles.map((role) => role.id).sort().join('\u0000')
 
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
@@ -76,6 +83,7 @@ export function CardEditDialog({
       subtitle={`${card.documentAuthors || '未知作者'} · ${card.documentTitle}`}
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={hasUnsavedChanges}
     >
       <form onSubmit={submit}>
         <div className="card-detail-origin-row">
@@ -173,11 +181,17 @@ export function CardEditDialog({
         </section>
         <div className="modal-actions">
           {onOpenSource ? (
-            <button className="button secondary source-dialog-action" type="button" onClick={onOpenSource}>
+            <button
+              className="button secondary source-dialog-action"
+              type="button"
+              disabled={hasUnsavedChanges}
+              title={hasUnsavedChanges ? '请先保存或放弃当前修改，再打开 PDF 原文。' : undefined}
+              onClick={onOpenSource}
+            >
               查看 PDF 原文
             </button>
           ) : null}
-          <button className="button ghost" type="button" onClick={onClose}>
+          <button className="button ghost" type="button" data-modal-close>
             取消
           </button>
           <button className="button primary" type="submit">

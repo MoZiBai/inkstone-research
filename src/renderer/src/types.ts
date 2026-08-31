@@ -4,4 +4,5 @@ export type RunMutation = (
   projectId?: string
 ) => Promise<boolean>
 
-export type Notify = (message: string) => void
+export type NoticeKind = 'success' | 'warning' | 'error'
+export type Notify = (message: string, kind?: NoticeKind) => void

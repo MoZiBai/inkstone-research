@@ -531,6 +531,7 @@ function OutlineLinkNoteDialog({
       subtitle={chapterTitle}
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={note !== link.note}
     >
       <form onSubmit={(event) => void submit(event)}>
         <label className="field">
@@ -545,7 +546,7 @@ function OutlineLinkNoteDialog({
           />
         </label>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>取消</button>
+          <button className="button ghost" type="button" data-modal-close>取消</button>
           <button className="button primary" type="submit">保存说明</button>
         </div>
       </form>
@@ -571,6 +572,12 @@ function OutlineNodeDialog({
   const [notes, setNotes] = useState(editingNode?.notes ?? '')
   const [coreArgument, setCoreArgument] = useState(editingNode?.coreArgument ?? '')
   const [openQuestions, setOpenQuestions] = useState(editingNode?.openQuestions ?? '')
+  const hasUnsavedChanges = editingNode
+    ? title !== editingNode.title ||
+      notes !== editingNode.notes ||
+      coreArgument !== editingNode.coreArgument ||
+      openQuestions !== editingNode.openQuestions
+    : title.trim().length > 0
 
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
@@ -605,6 +612,7 @@ function OutlineNodeDialog({
       subtitle="章节结构和内容说明由研究者自行维护。"
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={hasUnsavedChanges}
     >
       <form onSubmit={submit}>
         <label className="field">
@@ -644,7 +652,7 @@ function OutlineNodeDialog({
           </>
         ) : null}
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>
+          <button className="button ghost" type="button" data-modal-close>
             取消
           </button>
           <button className="button primary" type="submit">

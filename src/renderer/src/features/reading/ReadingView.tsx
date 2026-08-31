@@ -295,6 +295,11 @@ export function ReadingView({
     setShowImportDialog(true)
   }
 
+  const beginCreateDocument = (): void => {
+    setMetadata({ ...EMPTY_METADATA })
+    setShowDocumentDialog(true)
+  }
+
   const choosePdf = async (): Promise<void> => {
     try {
       const selected = await open({
@@ -310,14 +315,14 @@ export function ReadingView({
         title: titleAfterPdfSelection(selected, importTargetDocumentId, current.title)
       }))
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     }
   }
 
   const importPdf = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
     if (!snapshot.currentProjectId || !importSourcePath) {
-      notify('请先选择一个 PDF 文件。')
+      notify('请先选择一个 PDF 文件。', 'warning')
       return
     }
     const targetDocument = snapshot.documents.find(
@@ -344,7 +349,7 @@ export function ReadingView({
       setShowImportDialog(false)
       setImportSourcePath(null)
       if (result.hashChanged) {
-        notify('重新链接的 PDF 与原文件哈希不同；卡片和标注定位已保留，请抽查原文位置。')
+        notify('重新链接的 PDF 与原文件哈希不同；卡片和标注定位已保留，请抽查原文位置。', 'warning')
       }
     }
   }
@@ -391,7 +396,7 @@ export function ReadingView({
       await api.revealPdfInFileManager(selectedDocument.id)
       notify('已在文件资源管理器中选中砚台管理的 PDF 副本。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     }
   }
 
@@ -570,7 +575,7 @@ export function ReadingView({
             <button
               className="icon-button"
               type="button"
-              onClick={() => setShowDocumentDialog(true)}
+              onClick={beginCreateDocument}
               aria-label="新增文献记录"
               title="新增文献记录"
             >
@@ -612,7 +617,7 @@ export function ReadingView({
                   <button className="button primary small" onClick={() => beginImport()}>
                     <FilePlus2 size={14} /> 导入 PDF
                   </button>
-                  <button className="button secondary small" onClick={() => setShowDocumentDialog(true)}>
+                  <button className="button secondary small" onClick={beginCreateDocument}>
                     新增文献记录
                   </button>
                 </div>
@@ -1008,6 +1013,7 @@ export function ReadingView({
           subtitle="先登记书目信息；PDF 可以稍后连接。"
           onClose={() => setShowDocumentDialog(false)}
           width="large"
+          hasUnsavedChanges={!metadataDraftEqual(metadata, EMPTY_METADATA)}
         >
           <form onSubmit={createDocument}>
             <BibliographicFields
@@ -1016,7 +1022,7 @@ export function ReadingView({
               autoFocusTitle
             />
             <div className="modal-actions">
-              <button className="button ghost" type="button" onClick={() => setShowDocumentDialog(false)}>
+              <button className="button ghost" type="button" data-modal-close>
                 取消
               </button>
               <button className="button primary" type="submit">
@@ -1045,11 +1051,12 @@ export function ReadingView({
           subtitle="粘贴引用会自动补齐空白字段；手工填写内容优先，也可以主动覆盖为识别结果。"
           onClose={() => setEditingDocument(null)}
           width="large"
+          hasUnsavedChanges={!metadataDraftEqual(metadata, metadataFromDocument(editingDocument))}
         >
           <form onSubmit={(event) => void saveDocumentMetadata(event)}>
             <BibliographicFields value={metadata} onChange={setMetadata} autoFocusTitle />
             <div className="modal-actions">
-              <button className="button ghost" type="button" onClick={() => setEditingDocument(null)}>
+              <button className="button ghost" type="button" data-modal-close>
                 取消
               </button>
               <button className="button primary" type="submit">
@@ -1241,6 +1248,7 @@ function PdfAnnotationEditDialog({
       subtitle={`PDF 第 ${annotation.pageNumber} 页 · 原文位置保持不变`}
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={color !== annotation.color || comment !== annotation.comment}
     >
       <form onSubmit={(event) => {
         event.preventDefault()
@@ -1264,7 +1272,7 @@ function PdfAnnotationEditDialog({
           />
         </label>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>取消</button>
+          <button className="button ghost" type="button" data-modal-close>取消</button>
           <button className="button primary" type="submit" disabled={saving}>
             {saving ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}
             保存批注
@@ -1354,6 +1362,10 @@ function ImportPdfDialog({
       subtitle="砚台会计算 SHA-256，并在应用目录保留一份只读副本；原文件不会被修改。"
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={
+        sourcePath !== null ||
+        !metadataDraftEqual(metadata, targetDocument ? metadataFromDocument(targetDocument) : EMPTY_METADATA)
+      }
     >
       <form onSubmit={(event) => void onSubmit(event)}>
         <div className="pdf-file-picker">
@@ -1375,7 +1387,7 @@ function ImportPdfDialog({
           同一个 PDF 在多个项目中导入时会复用文件实体；每个项目仍然拥有独立的评论、标签和论证用途。
         </p>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>
+          <button className="button ghost" type="button" data-modal-close>
             取消
           </button>
           <button className="button primary" type="submit" disabled={!sourcePath}>
@@ -1569,6 +1581,7 @@ function ReadingNoteDialog({
       subtitle={selection ? `关联 PDF 第 ${selection.pageNumber} 页的原文位置保持不变` : '当前文献的独立阅读笔记'}
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={content !== initialContent}
     >
       <form
         onSubmit={(event) => {
@@ -1595,7 +1608,7 @@ function ReadingNoteDialog({
           />
         </label>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>取消</button>
+          <button className="button ghost" type="button" data-modal-close>取消</button>
           <button className="button primary" type="submit" disabled={saving || !content.trim()}>
             {saving ? <LoaderCircle className="spin" size={15} /> : isInsight ? <Lightbulb size={15} /> : <MessageCircleQuestion size={15} />}
             {editing ? '保存修改' : `保存${isInsight ? '灵感' : '质疑'}`}
@@ -1651,6 +1664,12 @@ function CreateCardDialog({
       subtitle={`PDF 第 ${selection.pageNumber} 页 · 原文和定位信息会永久保留`}
       onClose={onClose}
       width="large"
+      hasUnsavedChanges={
+        displayText !== selection.text ||
+        comment !== initialComment ||
+        tags.length > 0 ||
+        printPage.length > 0
+      }
     >
       <form onSubmit={(event) => void submit(event)}>
         <label className="field excerpt-text-editor">
@@ -1716,7 +1735,7 @@ function CreateCardDialog({
           </div>
         </details>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>
+          <button className="button ghost" type="button" data-modal-close>
             取消
           </button>
           <button className="button primary" type="submit" disabled={saving}>
@@ -1745,6 +1764,12 @@ function metadataFromDocument(document: DocumentSummary): MetadataDraft {
     publisher: document.publisher,
     metadataRaw: document.metadataRaw
   }
+}
+
+function metadataDraftEqual(left: MetadataDraft, right: MetadataDraft): boolean {
+  return (Object.keys(EMPTY_METADATA) as Array<keyof MetadataDraft>).every(
+    (key) => left[key] === right[key]
+  )
 }
 
 function metadataInput(value: MetadataDraft): BibliographicMetadataInput {

@@ -533,6 +533,11 @@ function ResearchRoleManager({
   const [editing, setEditing] = useState<ResearchRole | 'new' | null>(null)
   const [name, setName] = useState('')
   const [color, setColor] = useState('#8a6757')
+  const [confirmingEditorDiscard, setConfirmingEditorDiscard] = useState(false)
+  const editorHasUnsavedChanges = editing
+    ? name !== (editing === 'new' ? '' : editing.name) ||
+      color !== (editing === 'new' ? '#8a6757' : editing.color)
+    : false
 
   const beginEditing = (role: ResearchRole | 'new'): void => {
     setEditing(role)
@@ -565,15 +570,17 @@ function ResearchRoleManager({
   }
 
   return (
-    <Modal
-      title="管理研究作用"
-      subtitle="研究作用属于当前项目；一张卡片可以同时选择多个。归档不会移除已有卡片关联。"
-      onClose={onClose}
-      width="large"
-    >
-      <div className="research-role-manager">
+    <>
+      <Modal
+        title="管理研究作用"
+        subtitle="研究作用属于当前项目；一张卡片可以同时选择多个。归档不会移除已有卡片关联。"
+        onClose={onClose}
+        width="large"
+        hasUnsavedChanges={editorHasUnsavedChanges}
+      >
+        <div className="research-role-manager">
         <div className="research-role-manager-toolbar">
-          <button className="button secondary" type="button" onClick={() => beginEditing('new')}>
+          <button className="button secondary" type="button" disabled={Boolean(editing)} onClick={() => beginEditing('new')}>
             <Plus size={14} /> 新建研究作用
           </button>
         </div>
@@ -589,7 +596,14 @@ function ResearchRoleManager({
               <code>{color}</code>
             </label>
             <div className="compact-actions">
-              <button className="button ghost" type="button" onClick={() => setEditing(null)}>取消</button>
+              <button
+                className="button ghost"
+                type="button"
+                onClick={() => {
+                  if (editorHasUnsavedChanges) setConfirmingEditorDiscard(true)
+                  else setEditing(null)
+                }}
+              >取消</button>
               <button className="button primary" type="submit">{editing === 'new' ? '创建' : '保存'}</button>
             </div>
           </form>
@@ -608,7 +622,7 @@ function ResearchRoleManager({
               <button type="button" disabled={index === roles.length - 1} onClick={() => void moveRole(role.id, 1)} title="下移">
                 <ArrowRight size={13} />
               </button>
-              <button type="button" onClick={() => beginEditing(role)} title="编辑">
+              <button type="button" disabled={Boolean(editing)} onClick={() => beginEditing(role)} title="编辑">
                 <Edit3 size={13} />
               </button>
               <button
@@ -625,10 +639,24 @@ function ResearchRoleManager({
           ))}
         </div>
         <div className="modal-actions">
-          <button className="button primary" type="button" onClick={onClose}>完成</button>
+          <button className="button primary" type="button" data-modal-close>完成</button>
         </div>
-      </div>
-    </Modal>
+        </div>
+      </Modal>
+      {confirmingEditorDiscard ? (
+        <ConfirmDialog
+          title="放弃研究作用的修改？"
+          description="名称或颜色尚未保存。可以继续编辑，或放弃这次修改。"
+          confirmLabel="放弃修改"
+          dangerous
+          onConfirm={() => {
+            setConfirmingEditorDiscard(false)
+            setEditing(null)
+          }}
+          onCancel={() => setConfirmingEditorDiscard(false)}
+        />
+      ) : null}
+    </>
   )
 }
 
@@ -682,6 +710,7 @@ function CategoryDialog({
         subtitle="分类是当前项目的整理结构，可以随研究推进持续调整。"
         onClose={onClose}
         width="small"
+        hasUnsavedChanges={name !== (category?.name ?? '') || color !== (category?.color ?? '#8a6757')}
       >
         <form onSubmit={submit}>
           <label className="field">
@@ -709,7 +738,7 @@ function CategoryDialog({
                 <Trash2 size={14} /> 删除分类
               </button>
             ) : null}
-            <button className="button ghost" type="button" onClick={onClose}>
+            <button className="button ghost" type="button" data-modal-close>
               取消
             </button>
             <button className="button primary" type="submit">

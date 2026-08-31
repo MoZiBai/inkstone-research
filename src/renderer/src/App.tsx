@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   BookOpen,
   Boxes,
+  CheckCircle2,
   ChevronDown,
   Database,
   DatabaseBackup,
@@ -12,6 +13,7 @@ import {
   HardDrive,
   Library,
   LoaderCircle,
+  CircleX,
   PanelLeftClose,
   PanelLeftOpen,
   PencilLine,
@@ -22,6 +24,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Type,
   Upload
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
@@ -41,11 +44,13 @@ import { ReadingView, type ReadingFocusRequest } from './features/reading/Readin
 import { parsePdfLocator } from './features/reading/pdfLocator'
 import { SynthesisView } from './features/synthesis/SynthesisView'
 import { api } from './lib/api'
-import type { RunMutation } from './types'
+import type { NoticeKind, RunMutation } from './types'
 
 type ViewId = 'reading' | 'library' | 'synthesis' | 'outline'
 
 const SIDEBAR_STORAGE_KEY = 'inkstone:project-sidebar-collapsed:v1'
+const FONT_SIZE_STORAGE_KEY = 'inkstone:font-size:v1'
+type FontSize = 'small' | 'standard' | 'large'
 
 const tabs: Array<{
   id: ViewId
@@ -64,7 +69,7 @@ export default function App(): React.JSX.Element {
   const [initialLoading, setInitialLoading] = useState(true)
   const [mutating, setMutating] = useState(false)
   const [fatalError, setFatalError] = useState<string | null>(null)
-  const [toast, setToast] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ message: string; kind: NoticeKind } | null>(null)
   const [projectDialogMode, setProjectDialogMode] = useState<'create' | 'edit' | null>(null)
   const [showProjectActions, setShowProjectActions] = useState(false)
   const [removingProject, setRemovingProject] = useState<ProjectSummary | null>(null)
@@ -84,12 +89,14 @@ export default function App(): React.JSX.Element {
   const [synthesisMode, setSynthesisMode] = useState<'active' | 'excluded'>('active')
   const [readingRequest, setReadingRequest] = useState<ReadingFocusRequest | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
+  const [fontSize, setFontSize] = useState<FontSize>(loadFontSize)
 
-  const notify = useCallback((message: string): void => {
-    setToast(message)
+  const notify = useCallback((message: string, kind: NoticeKind = 'success'): void => {
+    const notice = { message, kind }
+    setToast(notice)
     window.setTimeout(() => {
-      setToast((current) => (current === message ? null : current))
-    }, 3200)
+      setToast((current) => (current === notice ? null : current))
+    }, kind === 'error' ? 6500 : kind === 'warning' ? 5000 : 3200)
   }, [])
 
   const loadWorkspace = useCallback(async (projectId?: string): Promise<void> => {
@@ -128,6 +135,15 @@ export default function App(): React.JSX.Element {
     }
   }, [sidebarCollapsed])
 
+  useEffect(() => {
+    document.documentElement.dataset.fontSize = fontSize
+    try {
+      window.localStorage.setItem(FONT_SIZE_STORAGE_KEY, fontSize)
+    } catch {
+      // The selected size still applies for the current session.
+    }
+  }, [fontSize])
+
   const runMutation: RunMutation = useCallback(
     async (action, successMessage, projectId) => {
       if (mutating) return false
@@ -138,7 +154,7 @@ export default function App(): React.JSX.Element {
         notify(successMessage)
         return true
       } catch (error) {
-        notify(normalizeError(error))
+        notify(normalizeError(error), 'error')
         return false
       } finally {
         setMutating(false)
@@ -186,7 +202,7 @@ export default function App(): React.JSX.Element {
       await loadBackupManager()
       notify('完整数据库备份已导出。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setDatabaseBusy(false)
     }
@@ -206,7 +222,7 @@ export default function App(): React.JSX.Element {
       await loadBackupManager()
       notify('当前项目数据库已导出；PDF 文件未打包。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setDatabaseBusy(false)
     }
@@ -227,7 +243,7 @@ export default function App(): React.JSX.Element {
       setActiveView('reading')
       notify('项目及其项目专属研究数据已删除。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setMutating(false)
     }
@@ -246,7 +262,7 @@ export default function App(): React.JSX.Element {
       const preview = await api.previewDatabaseImport(source, mode === 'project')
       setPendingDatabaseImport({ path: source, mode, preview })
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setDatabaseBusy(false)
     }
@@ -294,9 +310,9 @@ export default function App(): React.JSX.Element {
       })
       setBackupManager(next)
       setBackupManagerError(null)
-      notify('自动备份目录已更新；旧目录中的备份仍保留在原位置。')
+      notify('自动备份目录已更新；旧目录中的备份仍保留在原位置。', 'warning')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setBackupManagerBusy(false)
     }
@@ -313,7 +329,7 @@ export default function App(): React.JSX.Element {
       setBackupManagerError(null)
       notify('自动备份设置已保存。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setBackupManagerBusy(false)
     }
@@ -326,9 +342,9 @@ export default function App(): React.JSX.Element {
       await loadBackupManager()
       notify(`备份清理完成：删除 ${result.deletedCount} 份，释放 ${formatBytes(result.freedBytes)}${
         result.failedCount > 0 ? `，${result.failedCount} 份未能处理` : ''
-      }。`)
+      }。`, result.failedCount > 0 ? 'warning' : 'success')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setBackupManagerBusy(false)
     }
@@ -343,7 +359,7 @@ export default function App(): React.JSX.Element {
       await loadBackupManager()
       notify('自动安全备份已删除；当前数据库未受影响。')
     } catch (error) {
-      notify(normalizeError(error))
+      notify(normalizeError(error), 'error')
     } finally {
       setBackupManagerBusy(false)
     }
@@ -373,12 +389,7 @@ export default function App(): React.JSX.Element {
   }
 
   return (
-    <div
-      className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
-      onContextMenu={(event) => {
-        if (!allowsNativeContextMenu(event.target)) event.preventDefault()
-      }}
-    >
+    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className="sidebar">
         <header className="brand">
           <span className="brand-seal">砚</span>
@@ -530,6 +541,20 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
           <div className="topbar-tools">
+            <div className="font-size-control" role="group" aria-label="界面字号">
+              <Type size={14} />
+              {(['small', 'standard', 'large'] as const).map((size) => (
+                <button
+                  className={fontSize === size ? 'active' : ''}
+                  type="button"
+                  key={size}
+                  aria-pressed={fontSize === size}
+                  onClick={() => setFontSize(size)}
+                >
+                  {size === 'small' ? '小' : size === 'standard' ? '标准' : '大'}
+                </button>
+              ))}
+            </div>
             <button
               className="topbar-database-button"
               type="button"
@@ -692,9 +717,9 @@ export default function App(): React.JSX.Element {
             )
           }
           onCleanup={() => void cleanupBackups()}
-          onRevealDirectory={() => void api.revealBackupDirectory().catch((error) => notify(normalizeError(error)))}
+          onRevealDirectory={() => void api.revealBackupDirectory().catch((error) => notify(normalizeError(error), 'error'))}
           onRevealBackup={(backupId) =>
-            void api.revealBackup(backupId).catch((error) => notify(normalizeError(error)))
+            void api.revealBackup(backupId).catch((error) => notify(normalizeError(error), 'error'))
           }
           onDeleteBackup={setDeletingBackup}
           onClose={() => setShowDatabaseDialog(false)}
@@ -732,9 +757,15 @@ export default function App(): React.JSX.Element {
         />
       ) : null}
 
-      <div className={`toast ${toast ? 'show' : ''}`} role="status">
-        <span className="toast-mark">✓</span>
-        <span>{toast}</span>
+      <div
+        className={`toast toast-${toast?.kind ?? 'success'} ${toast ? 'show' : ''}`}
+        role={toast?.kind === 'error' ? 'alert' : 'status'}
+        aria-live={toast?.kind === 'error' ? 'assertive' : 'polite'}
+      >
+        <span className="toast-mark">
+          {toast?.kind === 'error' ? <CircleX size={15} /> : toast?.kind === 'warning' ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
+        </span>
+        <span>{toast?.message}</span>
       </div>
       {mutating ? <div className="mutation-line" /> : null}
     </div>
@@ -1107,6 +1138,10 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
   const [description, setDescription] = useState(project?.description ?? '')
   const [color, setColor] = useState(project?.color ?? '#a05d43')
   const editing = Boolean(project)
+  const hasUnsavedChanges =
+    name !== (project?.name ?? '') ||
+    description !== (project?.description ?? '') ||
+    color !== (project?.color ?? '#a05d43')
 
   return (
     <Modal
@@ -1117,6 +1152,7 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
           : '项目可以是一篇论文、一个章节或其他研究任务，不预设类型。'
       }
       onClose={onClose}
+      hasUnsavedChanges={hasUnsavedChanges}
     >
       <form
         onSubmit={(event) => {
@@ -1150,7 +1186,7 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
           <code>{color}</code>
         </label>
         <div className="modal-actions">
-          <button className="button ghost" type="button" disabled={busy} onClick={onClose}>
+          <button className="button ghost" type="button" disabled={busy} data-modal-close>
             取消
           </button>
           <button className="button primary" type="submit" disabled={busy}>
@@ -1199,15 +1235,18 @@ function projectDatabaseFileName(projectName: string): string {
   return `砚台项目-${safeName}-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.db`
 }
 
-function allowsNativeContextMenu(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    Boolean(target.closest('input, textarea, [contenteditable="true"], [role="textbox"]'))
-  )
-}
-
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path
+}
+
+function loadFontSize(): FontSize {
+  if (typeof window === 'undefined') return 'standard'
+  try {
+    const stored = window.localStorage.getItem(FONT_SIZE_STORAGE_KEY)
+    return stored === 'small' || stored === 'large' || stored === 'standard' ? stored : 'standard'
+  } catch {
+    return 'standard'
+  }
 }
 
 function formatBytes(value: number): string {
