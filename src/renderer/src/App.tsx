@@ -147,9 +147,24 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
+  const checkScheduledBackup = useCallback(async (): Promise<void> => {
+    try {
+      setBackupManager(await api.runScheduledBackup())
+      setBackupManagerError(null)
+    } catch (error) {
+      setBackupManagerError(normalizeError(error))
+    }
+  }, [])
+
   useEffect(() => {
     void loadWorkspace()
   }, [loadWorkspace])
+
+  useEffect(() => {
+    void checkScheduledBackup()
+    const interval = window.setInterval(() => void checkScheduledBackup(), 15 * 60 * 1000)
+    return () => window.clearInterval(interval)
+  }, [checkScheduledBackup])
 
   useEffect(() => {
     try {
@@ -342,7 +357,8 @@ export default function App(): React.JSX.Element {
       setBackupManagerBusy(true)
       const next = await api.updateBackupSettings({
         customDirectory: directory,
-        retentionDays: backupManager?.settings.retentionDays ?? null
+        retentionDays: backupManager?.settings.retentionDays ?? null,
+        automaticIntervalHours: backupManager?.settings.automaticIntervalHours ?? 24
       })
       setBackupManager(next)
       setBackupManagerError(null)
@@ -356,14 +372,20 @@ export default function App(): React.JSX.Element {
 
   const updateBackupSettings = async (
     customDirectory: string | null,
-    retentionDays: number | null
+    retentionDays: number | null,
+    automaticIntervalHours: number
   ): Promise<void> => {
     setBackupManagerBusy(true)
     try {
-      const next = await api.updateBackupSettings({ customDirectory, retentionDays })
+      const next = await api.updateBackupSettings({
+        customDirectory,
+        retentionDays,
+        automaticIntervalHours
+      })
       setBackupManager(next)
       setBackupManagerError(null)
       notify('自动备份设置已保存。')
+      void checkScheduledBackup()
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
@@ -886,12 +908,24 @@ export default function App(): React.JSX.Element {
           onRefresh={() => void loadBackupManager()}
           onChooseDirectory={() => void chooseBackupDirectory()}
           onResetDirectory={() =>
-            void updateBackupSettings(null, backupManager?.settings.retentionDays ?? null)
+            void updateBackupSettings(
+              null,
+              backupManager?.settings.retentionDays ?? null,
+              backupManager?.settings.automaticIntervalHours ?? 24
+            )
           }
           onUpdateRetention={(retentionDays) =>
             void updateBackupSettings(
               backupManager?.settings.customDirectory ?? null,
-              retentionDays
+              retentionDays,
+              backupManager?.settings.automaticIntervalHours ?? 24
+            )
+          }
+          onUpdateInterval={(automaticIntervalHours) =>
+            void updateBackupSettings(
+              backupManager?.settings.customDirectory ?? null,
+              backupManager?.settings.retentionDays ?? null,
+              automaticIntervalHours
             )
           }
           onCleanup={() => void cleanupBackups()}
@@ -971,6 +1005,7 @@ interface DatabaseTransferDialogProps {
   onChooseDirectory: () => void
   onResetDirectory: () => void
   onUpdateRetention: (retentionDays: number | null) => void
+  onUpdateInterval: (automaticIntervalHours: number) => void
   onCleanup: () => void
   onRevealDirectory: () => void
   onRevealBackup: (backupId: string) => void
@@ -990,6 +1025,7 @@ function DatabaseTransferDialog({
   onChooseDirectory,
   onResetDirectory,
   onUpdateRetention,
+  onUpdateInterval,
   onCleanup,
   onRevealDirectory,
   onRevealBackup,
@@ -997,6 +1033,7 @@ function DatabaseTransferDialog({
   onClose
 }: DatabaseTransferDialogProps): React.JSX.Element {
   const retentionDays = manager?.settings.retentionDays ?? null
+  const automaticIntervalHours = manager?.settings.automaticIntervalHours ?? 24
   const usesCustomRetention = retentionDays !== null && ![7, 30, 90, 180].includes(retentionDays)
   const [showCustomRetention, setShowCustomRetention] = useState(usesCustomRetention)
   const [customRetentionDraft, setCustomRetentionDraft] = useState(
@@ -1050,7 +1087,7 @@ function DatabaseTransferDialog({
         <header className="backup-manager-heading">
           <div>
             <h3>自动安全备份</h3>
-            <p>导入合并前先备份当前数据库；只有登记过的自动备份会参与清理。</p>
+            <p>按所选频率备份当前数据库；导入合并前还会额外创建一份安全备份。</p>
           </div>
           <button className="icon-button" type="button" disabled={managerBusy} onClick={onRefresh} aria-label="刷新备份列表">
             <RefreshCw className={managerBusy ? 'spin' : undefined} size={16} />
@@ -1086,6 +1123,32 @@ function DatabaseTransferDialog({
                 {manager.settings.customDirectory ? (
                   <small>旧目录中的备份不会被移动或删除，仍会保留在下方记录中。</small>
                 ) : null}
+              </div>
+
+              <div className="backup-setting-card">
+                <label className="backup-retention-field">
+                  <span className="backup-setting-label">周期备份频率</span>
+                  <select
+                    value={String(automaticIntervalHours)}
+                    disabled={allBusy}
+                    onChange={(event) => onUpdateInterval(Number(event.target.value))}
+                  >
+                    <option value="0">关闭周期备份</option>
+                    <option value="6">每 6 小时</option>
+                    <option value="12">每 12 小时</option>
+                    <option value="24">每天（默认）</option>
+                    <option value="72">每 3 天</option>
+                    <option value="168">每周</option>
+                  </select>
+                </label>
+                <small>应用启动时和运行期间会检查是否到期；关闭后仍保留导入合并前的强制安全备份。</small>
+                {manager.settings.lastAutomaticBackupAt ? (
+                  <small title={manager.settings.lastAutomaticBackupResult ?? undefined}>
+                    最近周期备份：{formatDateTime(manager.settings.lastAutomaticBackupAt)}
+                  </small>
+                ) : (
+                  <small>{automaticIntervalHours === 0 ? '周期备份当前已关闭。' : '尚未完成过周期备份。'}</small>
+                )}
               </div>
 
               <div className="backup-setting-card">
@@ -1152,13 +1215,13 @@ function DatabaseTransferDialog({
 
             <div className="backup-records-heading">
               <div>
-                <h4>应用登记的备份</h4>
-                <span>{manager.records.length} 份 · 当前可用文件共 {formatBytes(manager.totalSizeBytes)}</span>
+                <h4>砚台识别的备份</h4>
+                <span>{manager.records.length} 份 · 校验后当前可用文件共 {formatBytes(manager.totalSizeBytes)}</span>
               </div>
             </div>
             <div className="backup-records-list">
               {manager.records.length === 0 ? (
-                <div className="backup-empty"><HardDrive size={20} /><span>尚无应用登记的数据库备份。</span></div>
+                <div className="backup-empty"><HardDrive size={20} /><span>当前目录中没有可识别的砚台备份；任意 .db 文件不会被误当作可清理备份。</span></div>
               ) : manager.records.map((record) => (
                 <article className={`backup-record ${record.isAvailable ? '' : 'unavailable'}`} key={record.id}>
                   <span className={`backup-kind backup-kind-${record.kind}`}>{backupKindLabel(record.kind)}</span>

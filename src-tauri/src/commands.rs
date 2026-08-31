@@ -123,11 +123,14 @@ fn resolved_backup_directory(
 }
 
 fn backup_manager_state(
-    repository: &Repository,
+    repository: &mut Repository,
     default_directory: &Path,
 ) -> AppResult<BackupManagerState> {
     let custom_directory = repository.backup_preferences()?.custom_directory;
     let resolved = resolved_backup_directory(repository, default_directory)?;
+    repository.cleanup_orphaned_backup_sidecars(&resolved.directory)?;
+    repository.register_automatic_backups_in_directory(&resolved.directory)?;
+    let preferences = repository.backup_preferences()?;
     let records = repository.backup_records()?;
     let total_size_bytes = records
         .iter()
@@ -141,6 +144,9 @@ fn backup_manager_state(
             custom_directory,
             effective_directory: resolved.directory.to_string_lossy().into_owned(),
             retention_days: resolved.retention_days,
+            automatic_interval_hours: preferences.automatic_interval_hours,
+            last_automatic_backup_at: preferences.last_automatic_backup_at,
+            last_automatic_backup_result: preferences.last_automatic_backup_result,
             directory_warning: resolved.warning,
             last_cleanup_at: resolved.last_cleanup_at,
             last_cleanup_result: resolved.last_cleanup_result,
@@ -543,8 +549,8 @@ pub async fn import_project_database(
 
 #[tauri::command]
 pub fn get_backup_manager(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
-    let guard = state.lock()?;
-    backup_manager_state(&guard, &state.backup_directory)
+    let mut guard = state.lock()?;
+    backup_manager_state(&mut guard, &state.backup_directory)
 }
 
 #[tauri::command]
@@ -559,8 +565,64 @@ pub fn update_backup_settings(
         .map(|path| validated_writable_backup_directory(&path))
         .transpose()?;
     let mut guard = state.lock()?;
-    guard.set_backup_preferences(custom_directory.as_deref(), input.retention_days)?;
-    backup_manager_state(&guard, &state.backup_directory)
+    guard.set_backup_preferences(
+        custom_directory.as_deref(),
+        input.retention_days,
+        input.automatic_interval_hours,
+    )?;
+    backup_manager_state(&mut guard, &state.backup_directory)
+}
+
+#[tauri::command]
+pub async fn run_scheduled_backup(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
+    let repository = Arc::clone(&state.repository);
+    let default_directory = state.backup_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository
+            .lock()
+            .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))?;
+        let resolved = resolved_backup_directory(&guard, &default_directory)?;
+        guard.register_automatic_backups_in_directory(&resolved.directory)?;
+        let preferences = guard.backup_preferences()?;
+        let interval_hours = preferences.automatic_interval_hours;
+        let now = Utc::now();
+        let due = scheduled_backup_is_due(
+            interval_hours,
+            preferences.last_automatic_backup_at.as_deref(),
+            now,
+        );
+        if due {
+            let destination = resolved.directory.join(format!(
+                "inkstone-before-scheduled-{}-{}.db",
+                now.format("%Y%m%d-%H%M%S"),
+                &Uuid::new_v4().to_string()[..8]
+            ));
+            guard.export_database(&destination)?;
+            guard.record_backup(&destination, "auto", None, Some(&resolved.directory))?;
+            guard.mark_automatic_backup_completed(&destination)?;
+            guard.cleanup_automatic_backups(&resolved.directory, resolved.retention_days)?;
+        }
+        backup_manager_state(&mut guard, &default_directory)
+    })
+    .await
+    .map_err(|error| AppError::Validation(format!("自动备份任务失败：{error}")))?
+}
+
+fn scheduled_backup_is_due(
+    interval_hours: i64,
+    last_automatic_backup_at: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if interval_hours <= 0 {
+        return false;
+    }
+    last_automatic_backup_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_none_or(|last| {
+            now.signed_duration_since(last.with_timezone(&Utc))
+                .num_hours()
+                >= interval_hours
+        })
 }
 
 #[tauri::command]
@@ -822,4 +884,34 @@ pub fn move_outline_card(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     state.lock()?.move_outline_card(&link_id, direction)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone};
+
+    use super::scheduled_backup_is_due;
+
+    #[test]
+    fn scheduled_backup_respects_disabled_and_elapsed_intervals() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 8, 31, 12, 0, 0)
+            .single()
+            .expect("test time");
+        let twenty_three_hours_ago = (now - Duration::hours(23)).to_rfc3339();
+        let twenty_four_hours_ago = (now - Duration::hours(24)).to_rfc3339();
+        assert!(!scheduled_backup_is_due(0, None, now));
+        assert!(scheduled_backup_is_due(24, None, now));
+        assert!(!scheduled_backup_is_due(
+            24,
+            Some(&twenty_three_hours_ago),
+            now
+        ));
+        assert!(scheduled_backup_is_due(
+            24,
+            Some(&twenty_four_hours_ago),
+            now
+        ));
+        assert!(scheduled_backup_is_due(24, Some("invalid"), now));
+    }
 }

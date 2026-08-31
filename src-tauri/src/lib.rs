@@ -52,6 +52,7 @@ pub fn run() {
             commands::preview_database_import,
             commands::get_backup_manager,
             commands::update_backup_settings,
+            commands::run_scheduled_backup,
             commands::cleanup_backups,
             commands::delete_automatic_backup,
             commands::reveal_backup,

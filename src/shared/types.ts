@@ -296,6 +296,9 @@ export interface BackupSettings {
   customDirectory: string | null
   effectiveDirectory: string
   retentionDays: number | null
+  automaticIntervalHours: number
+  lastAutomaticBackupAt: string | null
+  lastAutomaticBackupResult: string | null
   directoryWarning: string | null
   lastCleanupAt: string | null
   lastCleanupResult: string | null
@@ -316,6 +319,7 @@ export interface BackupCleanupResult {
 export interface UpdateBackupSettingsInput {
   customDirectory: string | null
   retentionDays: number | null
+  automaticIntervalHours: number
 }
 
 export interface CreateCardFromSelectionInput {
@@ -452,6 +456,7 @@ export interface InkstoneApi {
   importProjectDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   previewDatabaseImport: (sourcePath: string, projectOnly: boolean) => Promise<DatabaseImportPreview>
   getBackupManager: () => Promise<BackupManagerState>
+  runScheduledBackup: () => Promise<BackupManagerState>
   updateBackupSettings: (input: UpdateBackupSettingsInput) => Promise<BackupManagerState>
   cleanupBackups: () => Promise<BackupCleanupResult>
   deleteAutomaticBackup: (backupId: string) => Promise<void>

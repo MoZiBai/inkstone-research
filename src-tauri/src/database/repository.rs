@@ -1150,9 +1150,26 @@ impl Repository {
             .transpose()?;
         let last_cleanup_at = metadata_value(&self.connection, "backup_last_cleanup_at")?;
         let last_cleanup_result = metadata_value(&self.connection, "backup_last_cleanup_result")?;
+        let automatic_interval_hours =
+            metadata_value(&self.connection, "backup_automatic_interval_hours")?
+                .map(|value| {
+                    value.parse::<i64>().map_err(|_| {
+                        AppError::Validation("自动备份频率设置损坏，请重新设置。".into())
+                    })
+                })
+                .transpose()?
+                .unwrap_or(24);
+        validate_automatic_backup_interval(automatic_interval_hours)?;
+        let last_automatic_backup_at =
+            metadata_value(&self.connection, "backup_last_automatic_at")?;
+        let last_automatic_backup_result =
+            metadata_value(&self.connection, "backup_last_automatic_result")?;
         Ok(BackupPreferences {
             custom_directory,
             retention_days,
+            automatic_interval_hours,
+            last_automatic_backup_at,
+            last_automatic_backup_result,
             last_cleanup_at,
             last_cleanup_result,
         })
@@ -1162,12 +1179,14 @@ impl Repository {
         &mut self,
         custom_directory: Option<&Path>,
         retention_days: Option<i64>,
+        automatic_interval_hours: i64,
     ) -> AppResult<()> {
         if retention_days.is_some_and(|days| !(1..=3650).contains(&days)) {
             return Err(AppError::Validation(
                 "自动备份保留天数必须在 1 到 3650 天之间。".into(),
             ));
         }
+        validate_automatic_backup_interval(automatic_interval_hours)?;
         let transaction = self.connection.transaction()?;
         set_or_remove_metadata(
             &transaction,
@@ -1179,6 +1198,23 @@ impl Repository {
             "backup_retention_days",
             retention_days.map(|days| days.to_string()),
         )?;
+        set_or_remove_metadata(
+            &transaction,
+            "backup_automatic_interval_hours",
+            Some(automatic_interval_hours.to_string()),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_automatic_backup_completed(&mut self, path: &Path) -> AppResult<()> {
+        let transaction = self.connection.transaction()?;
+        set_or_remove_metadata(&transaction, "backup_last_automatic_at", Some(timestamp()))?;
+        set_or_remove_metadata(
+            &transaction,
+            "backup_last_automatic_result",
+            Some(format!("已创建 {}", path.to_string_lossy())),
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -1189,6 +1225,17 @@ impl Repository {
         kind: &str,
         project_id: Option<&str>,
         managed_directory: Option<&Path>,
+    ) -> AppResult<()> {
+        self.record_backup_at(path, kind, project_id, managed_directory, &timestamp())
+    }
+
+    fn record_backup_at(
+        &mut self,
+        path: &Path,
+        kind: &str,
+        project_id: Option<&str>,
+        managed_directory: Option<&Path>,
+        created_at: &str,
     ) -> AppResult<()> {
         if !["auto", "full", "project"].contains(&kind) {
             return Err(AppError::Validation("备份类型无效。".into()));
@@ -1222,10 +1269,84 @@ impl Repository {
                 project_id,
                 managed_directory.map(|directory| directory.to_string_lossy().into_owned()),
                 size_bytes,
-                timestamp()
+                created_at
             ],
         )?;
         Ok(())
+    }
+
+    pub fn register_automatic_backups_in_directory(&mut self, directory: &Path) -> AppResult<i64> {
+        let canonical_directory = directory.canonicalize()?;
+        let mut registered = 0_i64;
+        for entry in fs::read_dir(&canonical_directory)? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            let Ok(validated) = validated_automatic_backup_path(
+                &path,
+                &canonical_directory,
+                Some(&canonical_directory),
+            ) else {
+                continue;
+            };
+            let path_value = validated.to_string_lossy().into_owned();
+            let exists: i64 = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM backup_records WHERE path = ?1)",
+                params![path_value],
+                |row| row.get(0),
+            )?;
+            if exists == 1 || validate_database_file(&validated).is_err() {
+                continue;
+            }
+            let created_at = fs::metadata(&validated)
+                .and_then(|metadata| metadata.modified())
+                .map(DateTime::<Utc>::from)
+                .unwrap_or_else(|_| Utc::now())
+                .to_rfc3339();
+            self.record_backup_at(
+                &validated,
+                "auto",
+                None,
+                Some(&canonical_directory),
+                &created_at,
+            )?;
+            registered += 1;
+        }
+        Ok(registered)
+    }
+
+    pub fn cleanup_orphaned_backup_sidecars(&self, directory: &Path) -> AppResult<i64> {
+        let canonical_directory = directory.canonicalize()?;
+        let mut removed = 0_i64;
+        for entry in fs::read_dir(&canonical_directory)? {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let is_inkstone_temporary_sidecar = [
+                ".inkstone-export-",
+                ".inkstone-project-export-",
+                ".inkstone-import-",
+                ".inkstone-merge-",
+            ]
+            .iter()
+            .any(|prefix| file_name.starts_with(prefix))
+                && (file_name.ends_with(".tmp-wal") || file_name.ends_with(".tmp-shm"));
+            if !is_inkstone_temporary_sidecar {
+                continue;
+            }
+            let base_name = file_name
+                .strip_suffix("-wal")
+                .or_else(|| file_name.strip_suffix("-shm"))
+                .unwrap_or(file_name);
+            if canonical_directory.join(base_name).exists() {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     pub fn backup_records(&self) -> AppResult<Vec<BackupRecord>> {
@@ -2633,7 +2754,8 @@ fn create_database_copy(source: &Connection, destination: &Path) -> AppResult<()
     let backup = Backup::new(source, &mut destination_connection)?;
     backup.run_to_completion(128, Duration::from_millis(10), None)?;
     drop(backup);
-    destination_connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    destination_connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     Ok(())
 }
 
@@ -2672,6 +2794,16 @@ fn set_or_remove_metadata(
         transaction.execute("DELETE FROM app_metadata WHERE key = ?1", params![key])?;
     }
     Ok(())
+}
+
+fn validate_automatic_backup_interval(interval_hours: i64) -> AppResult<()> {
+    if [0, 6, 12, 24, 72, 168].contains(&interval_hours) {
+        Ok(())
+    } else {
+        Err(AppError::Validation(
+            "自动备份频率必须使用应用提供的常用选项。".into(),
+        ))
+    }
 }
 
 fn validated_automatic_backup_path(
@@ -4794,7 +4926,7 @@ mod tests {
         {
             let mut source = Repository::open(&source_path).expect("open source repository");
             source
-                .set_backup_preferences(Some(&root), Some(30))
+                .set_backup_preferences(Some(&root), Some(30), 24)
                 .expect("set source-only backup preferences");
             source
                 .export_database(&manual_backup_path)
@@ -5349,7 +5481,7 @@ mod tests {
         {
             let mut repository = Repository::open(&database_path).expect("open database");
             repository
-                .set_backup_preferences(Some(&custom_directory), Some(90))
+                .set_backup_preferences(Some(&custom_directory), Some(90), 72)
                 .expect("save backup preferences");
         }
 
@@ -5363,6 +5495,7 @@ mod tests {
                 Some(custom_directory.to_string_lossy().as_ref())
             );
             assert_eq!(preferences.retention_days, Some(90));
+            assert_eq!(preferences.automatic_interval_hours, 72);
         }
 
         for suffix in ["", "-wal", "-shm"] {
@@ -5370,6 +5503,86 @@ mod tests {
         }
         fs::remove_dir(&custom_directory).expect("remove empty custom directory");
         fs::remove_dir(&root).expect("remove empty backup test root");
+    }
+
+    #[test]
+    fn backup_directory_scan_registers_only_valid_inkstone_automatic_backups() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-backups")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create backup scan directory");
+        let database_path = root.join("inkstone.db");
+        let valid_backup = root.join("inkstone-before-scheduled-20260831-120000-valid.db");
+        let invalid_backup = root.join("inkstone-before-scheduled-20260831-120001-invalid.db");
+        let unrelated_backup = root.join("renamed-manual-export.db");
+        let orphan_wal = root.join(".inkstone-export-old.tmp-wal");
+        let orphan_shm = root.join(".inkstone-import-old.tmp-shm");
+        let unrelated_sidecar = root.join("unrelated.tmp-shm");
+
+        {
+            let mut repository = Repository::open(&database_path).expect("open database");
+            repository
+                .export_database(&valid_backup)
+                .expect("create valid automatic backup fixture");
+            repository
+                .export_database(&unrelated_backup)
+                .expect("create unrelated valid database fixture");
+            fs::write(&invalid_backup, b"not a sqlite database")
+                .expect("create invalid automatic backup fixture");
+            fs::write(&orphan_wal, b"old wal").expect("create orphan wal fixture");
+            fs::write(&orphan_shm, b"old shm").expect("create orphan shm fixture");
+            fs::write(&unrelated_sidecar, b"keep").expect("create unrelated sidecar fixture");
+
+            assert_eq!(
+                repository
+                    .cleanup_orphaned_backup_sidecars(&root)
+                    .expect("cleanup orphaned backup sidecars"),
+                2
+            );
+            assert!(!orphan_wal.exists());
+            assert!(!orphan_shm.exists());
+            assert!(unrelated_sidecar.is_file());
+
+            assert_eq!(
+                repository
+                    .register_automatic_backups_in_directory(&root)
+                    .expect("scan automatic backups"),
+                1
+            );
+            assert_eq!(
+                repository
+                    .register_automatic_backups_in_directory(&root)
+                    .expect("repeat automatic backup scan"),
+                0
+            );
+            let records = repository.backup_records().expect("read backup records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, "auto");
+            assert_eq!(
+                Path::new(&records[0].path),
+                valid_backup.canonicalize().expect("canonical backup path")
+            );
+
+            repository
+                .mark_automatic_backup_completed(&valid_backup)
+                .expect("mark completed automatic backup");
+            let preferences = repository
+                .backup_preferences()
+                .expect("read automatic backup completion");
+            assert!(preferences.last_automatic_backup_at.is_some());
+            assert!(preferences
+                .last_automatic_backup_result
+                .as_deref()
+                .is_some_and(|result| result.contains("inkstone-before-scheduled")));
+            assert!(repository.set_backup_preferences(None, None, 5).is_err());
+        }
+
+        for entry in fs::read_dir(&root).expect("list backup scan fixtures") {
+            let path = entry.expect("backup scan fixture entry").path();
+            fs::remove_file(path).expect("remove backup scan fixture");
+        }
+        fs::remove_dir(&root).expect("remove backup scan directory");
     }
 
     #[test]
