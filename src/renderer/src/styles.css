@@ -2340,8 +2340,8 @@ body.reading-panel-resizing * {
 
 .library-card {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) minmax(210px, 0.42fr);
-  gap: 17px;
+  grid-template-columns: 48px minmax(0, 1fr) minmax(210px, 0.42fr);
+  gap: 14px;
   padding: 18px 17px;
   border-bottom: 1px solid var(--line);
   content-visibility: auto;
@@ -2362,14 +2362,18 @@ body.reading-panel-resizing * {
 
 .page-marker span {
   color: var(--ink-500);
-  font-size: calc(12px + var(--font-delta));
+  font-size: calc(10px + var(--font-delta));
 }
 
 .page-marker strong {
   color: var(--terracotta);
   font-family: var(--serif);
-  font-size: calc(25px + var(--font-delta));
+  font-size: calc(18px + var(--font-delta));
   font-weight: 600;
+}
+
+.page-marker strong.pdf-only {
+  color: var(--ink-600);
 }
 
 .page-marker small {
@@ -2433,8 +2437,8 @@ body.reading-panel-resizing * {
   margin: 0;
   color: var(--ink-900);
   font-family: var(--serif);
-  font-size: calc(15px + var(--font-delta));
-  line-height: 1.85;
+  font-size: calc(14px + var(--font-delta));
+  line-height: 1.75;
 }
 
 .library-card blockquote::before,
@@ -2453,10 +2457,35 @@ body.reading-panel-resizing * {
 }
 
 .research-comment {
-  margin: 9px 0 0;
-  color: var(--ink-700);
-  font-size: calc(12px + var(--font-delta));
+  margin: 0 0 11px;
+  padding: 9px 11px;
+  color: var(--ink-800);
+  border-left: 3px solid var(--terracotta);
+  border-radius: 0 7px 7px 0;
+  background: rgba(164, 95, 69, 0.055);
+}
+
+.research-comment > span,
+.card-evidence > span,
+.synthesis-card-comment > span,
+.synthesis-card-evidence > span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--ink-500);
+  font-size: calc(10px + var(--font-delta));
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.research-comment p {
+  margin: 0;
+  font-size: calc(15px + var(--font-delta));
   line-height: 1.65;
+}
+
+.card-evidence {
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
 }
 
 .tag-list {
@@ -2752,17 +2781,30 @@ body.reading-panel-resizing * {
 .synthesis-card blockquote {
   display: -webkit-box;
   overflow: hidden;
-  font-size: calc(14px + var(--font-delta));
-  line-height: 1.75;
+  font-size: calc(13px + var(--font-delta));
+  line-height: 1.68;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 5;
 }
 
-.synthesis-card > p {
-  margin: 8px 0 0;
-  color: var(--ink-700);
-  font-size: calc(12px + var(--font-delta));
-  line-height: 1.6;
+.synthesis-card-comment {
+  margin-bottom: 9px;
+  padding: 8px 9px;
+  color: var(--ink-800);
+  border-left: 3px solid var(--terracotta);
+  border-radius: 0 6px 6px 0;
+  background: rgba(164, 95, 69, 0.055);
+}
+
+.synthesis-card-comment p {
+  margin: 0;
+  font-size: calc(14px + var(--font-delta));
+  line-height: 1.55;
+}
+
+.synthesis-card-evidence {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
 .card-meta-row {
@@ -4549,7 +4591,6 @@ body.reading-panel-resizing * {
   background: rgba(255, 255, 252, 0.97);
   box-shadow: 0 9px 25px rgba(35, 42, 38, 0.2);
   backdrop-filter: blur(10px);
-  overflow-x: auto;
 }
 
 .pdf-selection-toolbar button {
@@ -4602,10 +4643,8 @@ body.reading-panel-resizing * {
 }
 
 .selection-annotation-colors {
-  position: absolute;
-  z-index: 2;
-  top: calc(100% + 8px);
-  left: 50%;
+  position: fixed;
+  z-index: 126;
   display: flex;
   gap: 5px;
   padding: 7px;
@@ -4613,10 +4652,10 @@ body.reading-panel-resizing * {
   border-radius: 9px;
   background: rgba(255, 255, 252, 0.98);
   box-shadow: 0 8px 22px rgba(35, 42, 38, 0.19);
-  transform: translateX(-50%);
+  backdrop-filter: blur(10px);
 }
 
-.pdf-selection-toolbar .selection-annotation-colors button {
+.selection-annotation-colors button {
   width: 20px;
   min-width: 20px;
   min-height: 20px;
@@ -4627,7 +4666,7 @@ body.reading-panel-resizing * {
   box-shadow: inset 0 0 0 1px rgba(43, 48, 45, 0.18);
 }
 
-.pdf-selection-toolbar .selection-annotation-colors button.active {
+.selection-annotation-colors button.active {
   border-color: white;
   outline: 2px solid var(--ink-600);
 }
@@ -6061,7 +6100,7 @@ body.reading-panel-resizing * {
 }
 
 .library-card {
-  grid-template-columns: 24px 64px minmax(0, 1fr) minmax(210px, 0.42fr);
+  grid-template-columns: 24px 48px minmax(0, 1fr) minmax(210px, 0.42fr);
 }
 
 .library-card.selected,
@@ -6169,7 +6208,7 @@ body.reading-panel-resizing * {
   }
 
   .library-card {
-    grid-template-columns: 24px 56px minmax(0, 1fr);
+    grid-template-columns: 24px 48px minmax(0, 1fr);
   }
 
   .library-card-status {

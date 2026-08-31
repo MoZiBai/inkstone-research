@@ -84,6 +84,10 @@ interface AnnotationMenuState extends ToolbarPosition {
   annotations: PdfAnnotation[]
 }
 
+interface SelectionColorPickerState extends ToolbarPosition {
+  kind: PdfAnnotationKind
+}
+
 export function PdfViewer({
   document,
   annotations,
@@ -134,7 +138,7 @@ export function PdfViewer({
   const [annotationColors, setAnnotationColors] = useState<Record<PdfAnnotationKind, string>>(
     loadDefaultAnnotationColors
   )
-  const [selectionColorPicker, setSelectionColorPicker] = useState<PdfAnnotationKind | null>(null)
+  const [selectionColorPicker, setSelectionColorPicker] = useState<SelectionColorPickerState | null>(null)
 
   const clearSelection = useCallback((): void => {
     setSelection(null)
@@ -168,7 +172,7 @@ export function PdfViewer({
     if (!selection || !toolbarPosition) return undefined
     const dismissOnOutsidePointerDown = (event: PointerEvent): void => {
       const target = event.target instanceof Element ? event.target : null
-      if (target?.closest('.pdf-selection-toolbar')) return
+      if (target?.closest('.pdf-selection-toolbar, .selection-annotation-colors')) return
       clearSelection()
     }
     window.addEventListener('pointerdown', dismissOnOutsidePointerDown, true)
@@ -643,6 +647,28 @@ export function PdfViewer({
     createAnnotation(kind, color)
   }
 
+  const toggleSelectionColorPicker = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    kind: PdfAnnotationKind
+  ): void => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const menuWidth = 166
+    const menuHeight = 38
+    const preferredTop = rect.bottom + 7
+    setSelectionColorPicker((current) => current?.kind === kind
+      ? null
+      : {
+          kind,
+          left: Math.min(
+            window.innerWidth - menuWidth - 12,
+            Math.max(12, rect.left + rect.width / 2 - menuWidth / 2)
+          ),
+          top: preferredTop + menuHeight <= window.innerHeight - 12
+            ? preferredTop
+            : Math.max(12, rect.top - menuHeight - 7)
+        })
+  }
+
   const createReadingNote = (kind: 'insight' | 'critique'): void => {
     if (!selection) return
     onCreateReadingNote(selection, kind)
@@ -907,20 +933,13 @@ export function PdfViewer({
             <button
               className="selection-color-trigger"
               type="button"
-              onClick={() => setSelectionColorPicker((current) => current === 'highlight' ? null : 'highlight')}
+              onClick={(event) => toggleSelectionColorPicker(event, 'highlight')}
               title="选择高亮颜色"
               aria-label="选择高亮颜色"
-              aria-expanded={selectionColorPicker === 'highlight'}
+              aria-expanded={selectionColorPicker?.kind === 'highlight'}
             >
               <ChevronRight size={12} />
             </button>
-            {selectionColorPicker === 'highlight' ? (
-              <SelectionAnnotationColors
-                kind="highlight"
-                currentColor={annotationColors.highlight}
-                onChoose={chooseAnnotationColor}
-              />
-            ) : null}
           </div>
           <div className="selection-annotation-tool">
             <button type="button" onClick={() => createAnnotation('underline')} title="使用当前颜色保存下划线">
@@ -930,20 +949,13 @@ export function PdfViewer({
             <button
               className="selection-color-trigger"
               type="button"
-              onClick={() => setSelectionColorPicker((current) => current === 'underline' ? null : 'underline')}
+              onClick={(event) => toggleSelectionColorPicker(event, 'underline')}
               title="选择下划线颜色"
               aria-label="选择下划线颜色"
-              aria-expanded={selectionColorPicker === 'underline'}
+              aria-expanded={selectionColorPicker?.kind === 'underline'}
             >
               <ChevronRight size={12} />
             </button>
-            {selectionColorPicker === 'underline' ? (
-              <SelectionAnnotationColors
-                kind="underline"
-                currentColor={annotationColors.underline}
-                onChoose={chooseAnnotationColor}
-              />
-            ) : null}
           </div>
           <button type="button" onClick={() => createReadingNote('insight')} title="记录与原文关联的灵感">
             <span className="selection-tool-mark insight-mark">灵</span>灵感
@@ -952,6 +964,15 @@ export function PdfViewer({
             <span className="selection-tool-mark critique-mark">疑</span>质疑
           </button>
         </div>
+      ) : null}
+
+      {selection && selectionColorPicker ? (
+        <SelectionAnnotationColors
+          kind={selectionColorPicker.kind}
+          currentColor={annotationColors[selectionColorPicker.kind]}
+          position={selectionColorPicker}
+          onChoose={chooseAnnotationColor}
+        />
       ) : null}
 
       {annotationMenu ? (
@@ -1065,16 +1086,24 @@ const ANNOTATION_COLOR_STORAGE_KEYS: Record<PdfAnnotationKind, string> = {
 interface SelectionAnnotationColorsProps {
   kind: PdfAnnotationKind
   currentColor: string
+  position: ToolbarPosition
   onChoose: (kind: PdfAnnotationKind, color: string) => void
 }
 
 function SelectionAnnotationColors({
   kind,
   currentColor,
+  position,
   onChoose
 }: SelectionAnnotationColorsProps): React.JSX.Element {
   return (
-    <div className="selection-annotation-colors" role="group" aria-label={`${kind === 'highlight' ? '高亮' : '下划线'}颜色`}>
+    <div
+      className="selection-annotation-colors"
+      style={{ left: position.left, top: position.top }}
+      onMouseDown={(event) => event.preventDefault()}
+      role="group"
+      aria-label={`${kind === 'highlight' ? '高亮' : '下划线'}颜色`}
+    >
       {ANNOTATION_COLORS.map((color) => (
         <button
           className={currentColor.toLocaleLowerCase() === color ? 'active' : ''}

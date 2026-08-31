@@ -417,10 +417,18 @@ export function SynthesisView({
                         </label>
                         <div className="synthesis-card-source">
                           <span>{card.documentAuthors || '未知作者'}</span>
-                          <span>第 {card.printPage ?? card.pdfPage ?? '—'} 页</span>
+                          <span>{card.printPage ? `印刷 ${card.printPage} · ` : ''}PDF {card.pdfPage ?? '—'}</span>
                         </div>
-                        <blockquote>{card.displayText}</blockquote>
-                        {card.comment ? <p>{card.comment}</p> : null}
+                        {card.comment ? (
+                          <div className="synthesis-card-comment">
+                            <span>我的笔记</span>
+                            <p>{card.comment}</p>
+                          </div>
+                        ) : null}
+                        <div className="synthesis-card-evidence">
+                          <span>原文摘录</span>
+                          <blockquote>{card.displayText}</blockquote>
+                        </div>
                         <div className="card-meta-row">
                           <div className="research-role-pills">
                             {card.researchRoles.length > 0 ? card.researchRoles.map((role) => (

@@ -289,9 +289,11 @@ export function LibraryView({
                         />
                       </label>
                       <div className="page-marker">
-                        <span>印刷页</span>
-                        <strong>{card.printPage ?? '—'}</strong>
-                        <small>PDF {card.pdfPage ?? '—'}</small>
+                        <span>{card.printPage ? '印刷页' : 'PDF 页'}</span>
+                        <strong className={card.printPage ? undefined : 'pdf-only'}>
+                          {card.printPage ?? card.pdfPage ?? '—'}
+                        </strong>
+                        {card.printPage ? <small>PDF {card.pdfPage ?? '—'}</small> : null}
                       </div>
                       <div className="library-card-body">
                         <div className="card-topline">
@@ -308,8 +310,16 @@ export function LibraryView({
                             <span className="soft-pill">保留原始版本</span>
                           ) : null}
                         </div>
-                        <blockquote>{card.displayText}</blockquote>
-                        {card.comment ? <p className="research-comment">{card.comment}</p> : null}
+                        {card.comment ? (
+                          <div className="research-comment">
+                            <span>我的笔记</span>
+                            <p>{card.comment}</p>
+                          </div>
+                        ) : null}
+                        <div className="card-evidence">
+                          <span>原文摘录</span>
+                          <blockquote>{card.displayText}</blockquote>
+                        </div>
                         <div className="tag-list">
                           {card.tags.map((tag) => (
                             <span key={tag}>{tag}</span>
