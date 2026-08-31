@@ -10,8 +10,9 @@ import {
   Search,
   Trash2
 } from 'lucide-react'
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type { ProjectCardView, WorkspaceSnapshot } from '@shared/types'
+import { BulkCardActions } from '../../components/BulkCardActions'
 import { CardEditDialog } from '../../components/CardEditDialog'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog } from '../../components/Modal'
@@ -49,6 +50,7 @@ export function LibraryView({
   const [expandedDocumentIds, setExpandedDocumentIds] = useState<Set<string>>(
     () => new Set()
   )
+  const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
 
   const filteredCards = useMemo(
     () => filterProjectCards(snapshot.cards, deferredQuery, stateFilter),
@@ -82,6 +84,32 @@ export function LibraryView({
     }),
     [snapshot.cards]
   )
+
+  useEffect(() => {
+    const availableIds = new Set(snapshot.cards.map((card) => card.id))
+    setSelectedCardIds((current) => new Set([...current].filter((id) => availableIds.has(id))))
+  }, [snapshot.cards])
+
+  const toggleCardSelection = (cardId: string): void => {
+    setSelectedCardIds((current) => {
+      const next = new Set(current)
+      if (next.has(cardId)) next.delete(cardId)
+      else next.add(cardId)
+      return next
+    })
+  }
+
+  const allVisibleSelected = filteredCards.length > 0 && filteredCards.every((card) => selectedCardIds.has(card.id))
+  const toggleVisibleSelection = (): void => {
+    setSelectedCardIds((current) => {
+      const next = new Set(current)
+      for (const card of filteredCards) {
+        if (allVisibleSelected) next.delete(card.id)
+        else next.add(card.id)
+      }
+      return next
+    })
+  }
 
   const saveCard = async (input: Parameters<typeof api.updateCard>[0]): Promise<void> => {
     const succeeded = await runMutation(() => api.updateCard(input), '卡片评论与标签已更新。')
@@ -130,6 +158,14 @@ export function LibraryView({
           <p>按来源文献回顾项目中的全部摘录、评论和整理状态。</p>
         </div>
         <div className="library-heading-actions">
+          <button
+            className="button secondary library-select-visible"
+            type="button"
+            disabled={filteredCards.length === 0}
+            onClick={toggleVisibleSelection}
+          >
+            {allVisibleSelected ? '取消当前选择' : `选择当前 ${filteredCards.length} 张`}
+          </button>
           <div className="segmented-control library-state-filter" aria-label="卡片整理状态筛选">
             {(['all', 'active', 'excluded'] as const).map((state) => (
               <button
@@ -170,6 +206,13 @@ export function LibraryView({
           </label>
         </div>
       </header>
+
+      <BulkCardActions
+        snapshot={snapshot}
+        selectedIds={selectedCardIds}
+        runMutation={runMutation}
+        onClear={() => setSelectedCardIds(new Set())}
+      />
 
       <div className="library-groups">
         {groups.map(({ document, cards }) => {
@@ -213,7 +256,15 @@ export function LibraryView({
                   const category = card.categoryId ? categoryById.get(card.categoryId) : undefined
                   const excluded = card.synthesisState === 'excluded'
                   return (
-                    <article className="library-card" key={card.id}>
+                    <article className={`library-card ${selectedCardIds.has(card.id) ? 'selected' : ''}`} key={card.id}>
+                      <label className="card-selection-checkbox" title="选择卡片进行批量操作">
+                        <input
+                          type="checkbox"
+                          checked={selectedCardIds.has(card.id)}
+                          onChange={() => toggleCardSelection(card.id)}
+                          aria-label={`选择卡片：${card.displayText.slice(0, 40)}`}
+                        />
+                      </label>
                       <div className="page-marker">
                         <span>印刷页</span>
                         <strong>{card.printPage ?? '—'}</strong>

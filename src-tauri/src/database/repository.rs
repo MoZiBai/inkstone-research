@@ -10,13 +10,13 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BackupCleanupResult, BackupPreferences, BackupRecord, CreateCardFromSelectionInput,
-    CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput,
-    CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview,
-    DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink,
-    OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
-    RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    BackupCleanupResult, BackupPreferences, BackupRecord, BatchUpdateCardsInput,
+    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    DatabaseImportPreview, DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
+    OutlineCardLink, OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary,
+    ReadingNote, RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput,
+    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
     UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
     WorkspaceSnapshot,
 };
@@ -1821,6 +1821,120 @@ impl Repository {
         Ok(())
     }
 
+    pub fn batch_update_cards(&mut self, input: BatchUpdateCardsInput) -> AppResult<usize> {
+        ensure_project_exists(&self.connection, &input.project_id)?;
+        let card_ids = input
+            .card_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        if card_ids.is_empty() {
+            return Err(AppError::Validation("请至少选择一张卡片。".into()));
+        }
+        if card_ids.len() > 5_000 {
+            return Err(AppError::Validation(
+                "单次最多批量处理 5000 张卡片。".into(),
+            ));
+        }
+
+        let add_tags = normalize_tags(&input.add_tags)?;
+        let remove_tags = normalize_tags(&input.remove_tags)?;
+        if add_tags.iter().any(|tag| remove_tags.contains(tag)) {
+            return Err(AppError::Validation(
+                "同一个标签不能在一次操作中同时添加和移除。".into(),
+            ));
+        }
+        if input.category_id.is_some() && input.synthesis_state.as_deref() == Some("excluded") {
+            return Err(AppError::Validation(
+                "批量移动分类和批量剔除应分开执行。".into(),
+            ));
+        }
+        if let Some(state) = input.synthesis_state.as_deref() {
+            if state != "active" && state != "excluded" {
+                return Err(AppError::Validation("未知的卡片整理状态。".into()));
+            }
+        }
+
+        let transaction = self.connection.transaction()?;
+        if let Some(category_id) = input.category_id.as_deref() {
+            let valid: i64 = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM synthesis_categories WHERE id = ?1 AND project_id = ?2)",
+                params![category_id, input.project_id],
+                |row| row.get(0),
+            )?;
+            if valid != 1 {
+                return Err(AppError::Validation("整理分类不属于当前项目。".into()));
+            }
+        }
+
+        for card_id in &card_ids {
+            let valid: i64 = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project_cards WHERE id = ?1 AND project_id = ?2)",
+                params![card_id, input.project_id],
+                |row| row.get(0),
+            )?;
+            if valid != 1 {
+                return Err(AppError::Validation(
+                    "所选卡片包含不存在或不属于当前项目的记录。".into(),
+                ));
+            }
+        }
+
+        let now = timestamp();
+        for card_id in &card_ids {
+            if !add_tags.is_empty() || !remove_tags.is_empty() {
+                let existing_tags = {
+                    let mut statement = transaction.prepare(
+                        r#"
+                        SELECT t.name
+                        FROM project_card_tags pct
+                        JOIN tags t ON t.id = pct.tag_id
+                        WHERE pct.project_card_id = ?1
+                        "#,
+                    )?;
+                    let rows =
+                        statement.query_map(params![card_id], |row| row.get::<_, String>(0))?;
+                    rows.collect::<Result<BTreeSet<_>, _>>()?
+                };
+                let next_tags = existing_tags
+                    .difference(&remove_tags)
+                    .cloned()
+                    .chain(add_tags.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                if next_tags.len() > 24 {
+                    return Err(AppError::Validation(
+                        "批量添加后单张卡片不能超过 24 个标签。".into(),
+                    ));
+                }
+                transaction.execute(
+                    "DELETE FROM project_card_tags WHERE project_card_id = ?1",
+                    params![card_id],
+                )?;
+                write_card_tags(&transaction, &input.project_id, card_id, next_tags, &now)?;
+            }
+            if let Some(category_id) = input.category_id.as_deref() {
+                transaction.execute(
+                    "UPDATE project_cards SET category_id = ?1, synthesis_state = 'active', updated_at = ?2 WHERE id = ?3",
+                    params![category_id, now, card_id],
+                )?;
+            } else if let Some(state) = input.synthesis_state.as_deref() {
+                transaction.execute(
+                    "UPDATE project_cards SET synthesis_state = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![state, now, card_id],
+                )?;
+            } else if !add_tags.is_empty() || !remove_tags.is_empty() {
+                transaction.execute(
+                    "UPDATE project_cards SET updated_at = ?1 WHERE id = ?2",
+                    params![now, card_id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(card_ids.len())
+    }
+
     pub fn create_research_role(&mut self, input: CreateResearchRoleInput) -> AppResult<String> {
         ensure_project_exists(&self.connection, &input.project_id)?;
         let name = required_text(&input.name, "研究作用名称")?;
@@ -3336,6 +3450,89 @@ mod tests {
             .outline_links
             .iter()
             .any(|link| link.project_card_id == "seed-card-1"));
+    }
+
+    #[test]
+    fn batch_card_updates_tags_category_and_synthesis_state_in_one_transaction() {
+        let mut repository = Repository::memory().expect("memory database");
+        let category_id = repository
+            .create_category(CreateCategoryInput {
+                project_id: "seed-project-tombs".into(),
+                name: "批量分类".into(),
+                color: "#8a6757".into(),
+            })
+            .expect("create batch category");
+
+        let affected = repository
+            .batch_update_cards(BatchUpdateCardsInput {
+                project_id: "seed-project-tombs".into(),
+                card_ids: vec!["seed-card-1".into(), "seed-card-4".into()],
+                add_tags: vec!["批量标签".into()],
+                remove_tags: vec!["墓葬空间".into()],
+                category_id: Some(category_id.clone()),
+                synthesis_state: None,
+            })
+            .expect("batch update cards");
+        assert_eq!(affected, 2);
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after batch update");
+        for card_id in ["seed-card-1", "seed-card-4"] {
+            let card = snapshot
+                .cards
+                .iter()
+                .find(|card| card.id == card_id)
+                .expect("updated card");
+            assert_eq!(card.category_id.as_deref(), Some(category_id.as_str()));
+            assert!(card.tags.iter().any(|tag| tag == "批量标签"));
+            assert!(!card.tags.iter().any(|tag| tag == "墓葬空间"));
+            assert_eq!(card.synthesis_state, "active");
+        }
+
+        repository
+            .batch_update_cards(BatchUpdateCardsInput {
+                project_id: "seed-project-tombs".into(),
+                card_ids: vec!["seed-card-1".into(), "seed-card-4".into()],
+                add_tags: vec![],
+                remove_tags: vec![],
+                category_id: None,
+                synthesis_state: Some("excluded".into()),
+            })
+            .expect("batch exclude cards");
+        let excluded = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after batch exclusion");
+        assert!(excluded
+            .cards
+            .iter()
+            .filter(|card| ["seed-card-1", "seed-card-4"].contains(&card.id.as_str()))
+            .all(|card| card.synthesis_state == "excluded"));
+    }
+
+    #[test]
+    fn batch_card_update_rejects_cross_project_selection_without_partial_writes() {
+        let mut repository = Repository::memory().expect("memory database");
+        let result = repository.batch_update_cards(BatchUpdateCardsInput {
+            project_id: "seed-project-tombs".into(),
+            card_ids: vec!["seed-card-1".into(), "seed-card-6".into()],
+            add_tags: vec!["不应写入".into()],
+            remove_tags: vec![],
+            category_id: None,
+            synthesis_state: None,
+        });
+        assert!(result.is_err());
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after rejected batch");
+        assert!(!snapshot
+            .cards
+            .iter()
+            .find(|card| card.id == "seed-card-1")
+            .expect("unchanged card")
+            .tags
+            .iter()
+            .any(|tag| tag == "不应写入"));
     }
 
     #[test]

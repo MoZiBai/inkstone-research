@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  CircleX,
   FilePlus2,
   FilePenLine,
   FileText,
@@ -14,11 +15,12 @@ import {
   LoaderCircle,
   MessageCircleQuestion,
   RotateCcw,
+  Search,
   Trash2,
   Underline
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BibliographicMetadataInput,
   DocumentSummary,
@@ -33,6 +35,12 @@ import type {
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
+import {
+  filterAndSortDocuments,
+  titleFromPdfPath,
+  type DocumentFilter,
+  type DocumentSort
+} from '../../lib/workspaceEfficiency'
 import type { Notify, RunMutation } from '../../types'
 import { PdfViewer } from './PdfViewer'
 import {
@@ -84,6 +92,14 @@ interface MetadataDraft {
   metadataRaw: string
 }
 
+interface PdfImportAttempt {
+  path: string
+  title: string
+  status: 'success' | 'error'
+  documentId: string | null
+  message: string
+}
+
 const EMPTY_METADATA: MetadataDraft = {
   title: '',
   authors: '',
@@ -113,7 +129,9 @@ export function ReadingView({
   const [showDocumentDialog, setShowDocumentDialog] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [importTargetDocumentId, setImportTargetDocumentId] = useState<string | null>(null)
-  const [importSourcePath, setImportSourcePath] = useState<string | null>(null)
+  const [importSourcePaths, setImportSourcePaths] = useState<string[]>([])
+  const [pdfImportAttempts, setPdfImportAttempts] = useState<PdfImportAttempt[]>([])
+  const [importingPdfs, setImportingPdfs] = useState(false)
   const [metadata, setMetadata] = useState<MetadataDraft>(EMPTY_METADATA)
   const [pendingCard, setPendingCard] = useState<{
     selection: PdfSelection
@@ -138,6 +156,10 @@ export function ReadingView({
   >(() => new Set(['document']))
   const [panelWidths, setPanelWidths] = useState<ReadingPanelWidths>(loadReadingPanelWidths)
   const [resizingPanel, setResizingPanel] = useState<ReadingPanel | null>(null)
+  const [documentQuery, setDocumentQuery] = useState('')
+  const [documentFilter, setDocumentFilter] = useState<DocumentFilter>('all')
+  const [documentSort, setDocumentSort] = useState<DocumentSort>('updated')
+  const deferredDocumentQuery = useDeferredValue(documentQuery)
   const focusCounter = useRef(0)
   const readingLayoutRef = useRef<HTMLDivElement>(null)
 
@@ -170,13 +192,22 @@ export function ReadingView({
       ),
     [currentPdfPage, documentAnnotations]
   )
-  const activeDocuments = useMemo(
+  const allActiveDocuments = useMemo(
     () => snapshot.documents.filter((document) => !document.isRemoved),
     [snapshot.documents]
   )
+  const activeDocuments = useMemo(
+    () => filterAndSortDocuments(allActiveDocuments, deferredDocumentQuery, documentFilter, documentSort),
+    [allActiveDocuments, deferredDocumentQuery, documentFilter, documentSort]
+  )
   const removedDocuments = useMemo(
-    () => snapshot.documents.filter((document) => document.isRemoved),
-    [snapshot.documents]
+    () => filterAndSortDocuments(
+      snapshot.documents.filter((document) => document.isRemoved),
+      deferredDocumentQuery,
+      documentFilter,
+      documentSort
+    ),
+    [deferredDocumentQuery, documentFilter, documentSort, snapshot.documents]
   )
 
   useEffect(() => {
@@ -191,8 +222,8 @@ export function ReadingView({
 
   useEffect(() => {
     if (snapshot.documents.some((document) => document.id === selectedDocumentId)) return
-    setSelectedDocumentId(activeDocuments[0]?.id ?? null)
-  }, [activeDocuments, selectedDocumentId, snapshot.currentProjectId, snapshot.documents])
+    setSelectedDocumentId(allActiveDocuments[0]?.id ?? null)
+  }, [allActiveDocuments, selectedDocumentId, snapshot.currentProjectId, snapshot.documents])
 
   useEffect(() => setCurrentPdfPage(1), [selectedDocument?.id])
 
@@ -290,7 +321,8 @@ export function ReadingView({
   const beginImport = (targetDocument?: DocumentSummary): void => {
     const target = targetDocument ?? null
     setImportTargetDocumentId(target?.id ?? null)
-    setImportSourcePath(null)
+    setImportSourcePaths([])
+    setPdfImportAttempts([])
     setMetadata(target ? metadataFromDocument(target) : { ...EMPTY_METADATA })
     setShowImportDialog(true)
   }
@@ -304,16 +336,20 @@ export function ReadingView({
     try {
       const selected = await open({
         title: '选择要导入的 PDF',
-        multiple: false,
+        multiple: importTargetDocumentId === null,
         directory: false,
         filters: [{ name: 'PDF 文档', extensions: ['pdf'] }]
       })
-      if (typeof selected !== 'string') return
-      setImportSourcePath(selected)
-      setMetadata((current) => ({
-        ...current,
-        title: titleAfterPdfSelection(selected, importTargetDocumentId, current.title)
-      }))
+      const paths = typeof selected === 'string' ? [selected] : selected
+      if (!paths || paths.length === 0) return
+      setImportSourcePaths(paths)
+      setPdfImportAttempts([])
+      if (paths.length === 1) {
+        setMetadata((current) => ({
+          ...current,
+          title: titleAfterPdfSelection(paths[0] as string, importTargetDocumentId, current.title)
+        }))
+      }
     } catch (error) {
       notify(normalizeError(error), 'error')
     }
@@ -321,10 +357,56 @@ export function ReadingView({
 
   const importPdf = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault()
-    if (!snapshot.currentProjectId || !importSourcePath) {
+    if (!snapshot.currentProjectId || importSourcePaths.length === 0) {
       notify('请先选择一个 PDF 文件。', 'warning')
       return
     }
+    if (importSourcePaths.length > 1 && !importTargetDocumentId) {
+      const attempts: PdfImportAttempt[] = []
+      setImportingPdfs(true)
+      const succeeded = await runMutation(
+        async () => {
+          for (const path of importSourcePaths) {
+            const title = titleFromPdfPath(path)
+            try {
+              const result = await api.importPdf({
+                projectId: snapshot.currentProjectId as string,
+                sourcePath: path,
+                targetDocumentId: null,
+                title
+              })
+              attempts.push({
+                path,
+                title,
+                status: 'success',
+                documentId: result.documentId,
+                message: result.reusedDocument ? '已关联现有文献' : '导入成功'
+              })
+            } catch (error) {
+              attempts.push({
+                path,
+                title,
+                status: 'error',
+                documentId: null,
+                message: normalizeError(error)
+              })
+            }
+            setPdfImportAttempts([...attempts])
+          }
+        },
+        `已处理 ${importSourcePaths.length} 份 PDF。`
+      )
+      setImportingPdfs(false)
+      if (!succeeded) return
+      const successfulAttempts = attempts.filter((attempt) => attempt.status === 'success')
+      if (successfulAttempts[0]?.documentId) setSelectedDocumentId(successfulAttempts[0].documentId)
+      const failedCount = attempts.length - successfulAttempts.length
+      if (failedCount > 0) {
+        notify(`批量导入完成：${successfulAttempts.length} 份成功，${failedCount} 份失败。`, 'warning')
+      }
+      return
+    }
+    const importSourcePath = importSourcePaths[0] as string
     const targetDocument = snapshot.documents.find(
       (document) => document.id === importTargetDocumentId
     )
@@ -347,7 +429,7 @@ export function ReadingView({
     if (succeeded && result) {
       setSelectedDocumentId(result.documentId)
       setShowImportDialog(false)
-      setImportSourcePath(null)
+      setImportSourcePaths([])
       if (result.hashChanged) {
         notify('重新链接的 PDF 与原文件哈希不同；卡片和标注定位已保留，请抽查原文位置。', 'warning')
       }
@@ -415,7 +497,7 @@ export function ReadingView({
     )
     if (succeeded) {
       setRemovingDocument(null)
-      if (!keepCards) setSelectedDocumentId(activeDocuments.find((document) => document.id !== removingDocument.id)?.id ?? null)
+      if (!keepCards) setSelectedDocumentId(allActiveDocuments.find((document) => document.id !== removingDocument.id)?.id ?? null)
     }
   }
 
@@ -560,7 +642,7 @@ export function ReadingView({
         <div className="panel-heading compact">
           <div>
             <span className="eyebrow">项目文献</span>
-            <h2>{activeDocuments.length} 篇文献</h2>
+            <h2>{allActiveDocuments.length} 篇文献</h2>
           </div>
           <div className="document-rail-actions">
             <button
@@ -583,6 +665,41 @@ export function ReadingView({
             </button>
           </div>
         </div>
+        <div className="document-list-tools">
+          <label className="document-search-box">
+            <Search size={14} />
+            <input
+              value={documentQuery}
+              onChange={(event) => setDocumentQuery(event.target.value)}
+              placeholder="搜索标题、作者、期刊或 DOI"
+              aria-label="搜索项目文献"
+            />
+            <span>{activeDocuments.length}</span>
+          </label>
+          <div>
+            <select
+              value={documentFilter}
+              onChange={(event) => setDocumentFilter(event.target.value as DocumentFilter)}
+              aria-label="筛选文献文件状态"
+            >
+              <option value="all">全部状态</option>
+              <option value="available">PDF 可用</option>
+              <option value="unlinked">尚未连接</option>
+              <option value="missing">PDF 缺失</option>
+            </select>
+            <select
+              value={documentSort}
+              onChange={(event) => setDocumentSort(event.target.value as DocumentSort)}
+              aria-label="文献排序"
+            >
+              <option value="updated">最近更新</option>
+              <option value="title">标题</option>
+              <option value="authors">作者</option>
+              <option value="year">年份</option>
+              <option value="cards">卡片数</option>
+            </select>
+          </div>
+        </div>
         <div className="document-list">
           {activeDocuments.map((document) => (
             <button
@@ -601,13 +718,13 @@ export function ReadingView({
                   {document.year ? ` · ${document.year}` : ''}
                 </small>
                 <em>
-                  {document.filePath ? '已连接 PDF' : '尚未连接 PDF'} · {document.cardCount} 张卡片
+                  {document.fileAvailable ? 'PDF 可用' : document.filePath ? 'PDF 缺失' : '尚未连接 PDF'} · {document.cardCount} 张卡片
                 </em>
               </span>
               {document.filePath ? null : <ChevronRight size={14} className="document-unlinked" />}
             </button>
           ))}
-          {activeDocuments.length === 0 ? (
+          {allActiveDocuments.length === 0 ? (
             <EmptyState
               icon={Library}
               title="项目中还没有文献"
@@ -623,6 +740,9 @@ export function ReadingView({
                 </div>
               }
             />
+          ) : null}
+          {allActiveDocuments.length > 0 && activeDocuments.length === 0 ? (
+            <p className="document-list-empty">没有符合当前搜索或筛选条件的文献。</p>
           ) : null}
           {removedDocuments.length > 0 ? (
             <section className="removed-document-section">
@@ -1035,13 +1155,17 @@ export function ReadingView({
 
       {showImportDialog ? (
         <ImportPdfDialog
-          sourcePath={importSourcePath}
+          sourcePaths={importSourcePaths}
+          attempts={pdfImportAttempts}
+          busy={importingPdfs}
           targetDocument={snapshot.documents.find((document) => document.id === importTargetDocumentId) ?? null}
           metadata={metadata}
           onChoose={choosePdf}
           onMetadataChange={setMetadata}
           onSubmit={importPdf}
-          onClose={() => setShowImportDialog(false)}
+          onClose={() => {
+            if (!importingPdfs) setShowImportDialog(false)
+          }}
         />
       ) : null}
 
@@ -1338,7 +1462,9 @@ function ReadingResizeHandle({
 }
 
 interface ImportPdfDialogProps {
-  sourcePath: string | null
+  sourcePaths: string[]
+  attempts: PdfImportAttempt[]
+  busy: boolean
   targetDocument: DocumentSummary | null
   metadata: MetadataDraft
   onChoose: () => Promise<void>
@@ -1348,7 +1474,9 @@ interface ImportPdfDialogProps {
 }
 
 function ImportPdfDialog({
-  sourcePath,
+  sourcePaths,
+  attempts,
+  busy,
   targetDocument,
   metadata,
   onChoose,
@@ -1363,36 +1491,72 @@ function ImportPdfDialog({
       onClose={onClose}
       width="large"
       hasUnsavedChanges={
-        sourcePath !== null ||
-        !metadataDraftEqual(metadata, targetDocument ? metadataFromDocument(targetDocument) : EMPTY_METADATA)
+        attempts.length === 0 && (
+          sourcePaths.length > 0 ||
+          !metadataDraftEqual(metadata, targetDocument ? metadataFromDocument(targetDocument) : EMPTY_METADATA)
+        )
       }
     >
       <form onSubmit={(event) => void onSubmit(event)}>
         <div className="pdf-file-picker">
           <div>
             <span className="eyebrow">PDF 文件</span>
-            <strong>{sourcePath ? fileName(sourcePath) : '尚未选择文件'}</strong>
-            <small>{sourcePath ?? '支持 .pdf；扫描件可以导入，但暂不提供 OCR 文字层。'}</small>
+            <strong>
+              {sourcePaths.length === 0
+                ? '尚未选择文件'
+                : sourcePaths.length === 1
+                  ? fileName(sourcePaths[0] as string)
+                  : `已选择 ${sourcePaths.length} 份 PDF`}
+            </strong>
+            <small>
+              {sourcePaths.length === 1
+                ? sourcePaths[0]
+                : sourcePaths.length > 1
+                  ? '批量导入会先使用文件名作为可编辑标题，并逐项显示结果。'
+                  : '支持一次选择多个 .pdf；扫描件可以导入，但暂不提供 OCR 文字层。'}
+            </small>
           </div>
-          <button className="button secondary" type="button" onClick={() => void onChoose()}>
-            <FilePlus2 size={15} /> 选择文件
+          <button className="button secondary" type="button" disabled={busy} onClick={() => void onChoose()}>
+            <FilePlus2 size={15} /> {targetDocument ? '选择文件' : '选择一个或多个文件'}
           </button>
         </div>
-        <BibliographicFields
-          value={metadata}
-          onChange={onMetadataChange}
-          autoFocusTitle={!sourcePath}
-        />
+        {sourcePaths.length <= 1 ? (
+          <BibliographicFields
+            value={metadata}
+            onChange={onMetadataChange}
+            autoFocusTitle={sourcePaths.length === 0}
+          />
+        ) : (
+          <div className="batch-pdf-import-list">
+            {sourcePaths.map((path) => {
+              const attempt = attempts.find((item) => item.path === path)
+              return (
+                <article className={attempt ? `status-${attempt.status}` : ''} key={path}>
+                  <span>{attempt?.status === 'success' ? <CheckCircle2 size={15} /> : attempt?.status === 'error' ? <CircleX size={15} /> : busy ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}</span>
+                  <div><strong>{titleFromPdfPath(path)}</strong><small title={path}>{path}</small></div>
+                  <em>{attempt?.message ?? '等待导入'}</em>
+                </article>
+              )
+            })}
+          </div>
+        )}
         <p className="import-note">
           同一个 PDF 在多个项目中导入时会复用文件实体；每个项目仍然拥有独立的评论、标签和论证用途。
         </p>
         <div className="modal-actions">
-          <button className="button ghost" type="button" data-modal-close>
-            取消
+          <button className="button ghost" type="button" disabled={busy} data-modal-close>
+            {attempts.length > 0 ? '关闭' : '取消'}
           </button>
-          <button className="button primary" type="submit" disabled={!sourcePath}>
-            <FilePlus2 size={15} /> 导入并打开
-          </button>
+          {attempts.length === 0 ? (
+            <button className="button primary" type="submit" disabled={sourcePaths.length === 0 || busy}>
+              {busy ? <LoaderCircle className="spin" size={15} /> : <FilePlus2 size={15} />}
+              {busy
+                ? `正在导入 ${sourcePaths.length} 份…`
+                : sourcePaths.length > 1
+                  ? `导入 ${sourcePaths.length} 份 PDF`
+                  : '导入并打开'}
+            </button>
+          ) : null}
         </div>
       </form>
     </Modal>

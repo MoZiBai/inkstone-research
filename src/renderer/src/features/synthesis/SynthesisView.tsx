@@ -23,6 +23,7 @@ import type {
   UpdateCardInput,
   WorkspaceSnapshot
 } from '@shared/types'
+import { BulkCardActions } from '../../components/BulkCardActions'
 import { CardEditDialog } from '../../components/CardEditDialog'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
@@ -63,6 +64,7 @@ export function SynthesisView({
   const [editingCategory, setEditingCategory] = useState<SynthesisCategory | 'new' | null>(null)
   const [showResearchRoleManager, setShowResearchRoleManager] = useState(false)
   const [query, setQuery] = useState('')
+  const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
   const activeCards = useMemo(
     () => snapshot.cards.filter((card) => card.synthesisState === 'active'),
@@ -88,6 +90,33 @@ export function SynthesisView({
     () => new Map(snapshot.categories.map((category) => [category.id, category])),
     [snapshot.categories]
   )
+  const currentVisibleCards = mode === 'active' ? visibleActiveCards : visibleExcludedCards
+  const allVisibleSelected = currentVisibleCards.length > 0 && currentVisibleCards.every((card) => selectedCardIds.has(card.id))
+
+  useEffect(() => {
+    const availableIds = new Set(snapshot.cards.map((card) => card.id))
+    setSelectedCardIds((current) => new Set([...current].filter((id) => availableIds.has(id))))
+  }, [snapshot.cards])
+
+  const toggleCardSelection = (cardId: string): void => {
+    setSelectedCardIds((current) => {
+      const next = new Set(current)
+      if (next.has(cardId)) next.delete(cardId)
+      else next.add(cardId)
+      return next
+    })
+  }
+
+  const toggleVisibleSelection = (): void => {
+    setSelectedCardIds((current) => {
+      const next = new Set(current)
+      for (const card of currentVisibleCards) {
+        if (allVisibleSelected) next.delete(card.id)
+        else next.add(card.id)
+      }
+      return next
+    })
+  }
 
   useEffect(() => setMode(initialMode), [initialMode])
 
@@ -203,6 +232,9 @@ export function SynthesisView({
           <p>项目全部卡片进入此处；剔除只退出整理工作区，不删除卡片。</p>
         </div>
         <div className="heading-actions">
+          <button className="button secondary" type="button" disabled={currentVisibleCards.length === 0} onClick={toggleVisibleSelection}>
+            {allVisibleSelected ? '取消当前选择' : `选择当前 ${currentVisibleCards.length} 张`}
+          </button>
           <label className="search-box synthesis-search-box">
             <Search size={15} />
             <input
@@ -236,6 +268,13 @@ export function SynthesisView({
           </button>
         </div>
       </header>
+
+      <BulkCardActions
+        snapshot={snapshot}
+        selectedIds={selectedCardIds}
+        runMutation={runMutation}
+        onClear={() => setSelectedCardIds(new Set())}
+      />
 
       {mode === 'active' ? (
         <div className="board-scroll">
@@ -333,7 +372,7 @@ export function SynthesisView({
                   <div className="column-cards">
                     {visibleCategoryCards.map((card) => (
                       <article
-                        className={`synthesis-card ${draggedCardId === card.id ? 'dragging' : ''}`}
+                        className={`synthesis-card ${selectedCardIds.has(card.id) ? 'selected' : ''} ${draggedCardId === card.id ? 'dragging' : ''}`}
                         key={card.id}
                         data-synthesis-card={card.id}
                         draggable
@@ -348,6 +387,14 @@ export function SynthesisView({
                           setDragOverCategory(null)
                         }}
                       >
+                        <label className="card-selection-checkbox" title="选择卡片进行批量操作" onPointerDown={(event) => event.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={selectedCardIds.has(card.id)}
+                            onChange={() => toggleCardSelection(card.id)}
+                            aria-label={`选择卡片：${card.displayText.slice(0, 40)}`}
+                          />
+                        </label>
                         <div className="synthesis-card-source">
                           <span>{card.documentAuthors || '未知作者'}</span>
                           <span>第 {card.printPage ?? card.pdfPage ?? '—'} 页</span>
@@ -435,10 +482,18 @@ export function SynthesisView({
             const previousCategory = card.categoryId ? categoryById.get(card.categoryId) : undefined
             return (
               <article
-                className="excluded-card"
+                className={`excluded-card ${selectedCardIds.has(card.id) ? 'selected' : ''}`}
                 key={card.id}
                 data-synthesis-card={card.id}
               >
+                <label className="card-selection-checkbox" title="选择卡片进行批量操作">
+                  <input
+                    type="checkbox"
+                    checked={selectedCardIds.has(card.id)}
+                    onChange={() => toggleCardSelection(card.id)}
+                    aria-label={`选择卡片：${card.displayText.slice(0, 40)}`}
+                  />
+                </label>
                 <div className="excluded-icon">
                   <ArchiveX size={18} />
                 </div>

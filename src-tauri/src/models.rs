@@ -452,6 +452,19 @@ pub struct UpdateCardInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BatchUpdateCardsInput {
+    pub project_id: String,
+    pub card_ids: Vec<String>,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+    pub category_id: Option<String>,
+    pub synthesis_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateResearchRoleInput {
     pub project_id: String,
     pub name: String,

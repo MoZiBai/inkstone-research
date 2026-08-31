@@ -344,6 +344,15 @@ export interface UpdateCardInput {
   tags: string[]
 }
 
+export interface BatchUpdateCardsInput {
+  projectId: string
+  cardIds: string[]
+  addTags?: string[]
+  removeTags?: string[]
+  categoryId?: string | null
+  synthesisState?: SynthesisState | null
+}
+
 export interface CreateResearchRoleInput {
   projectId: string
   name: string
@@ -424,6 +433,7 @@ export interface InkstoneApi {
   updateReadingNote: (input: UpdateReadingNoteInput) => Promise<void>
   deleteReadingNote: (noteId: string) => Promise<void>
   updateCard: (input: UpdateCardInput) => Promise<void>
+  batchUpdateCards: (input: BatchUpdateCardsInput) => Promise<number>
   createResearchRole: (input: CreateResearchRoleInput) => Promise<string>
   updateResearchRole: (input: UpdateResearchRoleInput) => Promise<void>
   setResearchRoleArchived: (researchRoleId: string, archived: boolean) => Promise<void>

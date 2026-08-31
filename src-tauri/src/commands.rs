@@ -11,12 +11,12 @@ use uuid::Uuid;
 use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BackupCleanupResult, BackupManagerState, BackupSettings, CreateCardFromSelectionInput,
-    CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput,
-    CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview,
-    DatabaseImportResult, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
-    RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    BackupCleanupResult, BackupManagerState, BackupSettings, BatchUpdateCardsInput,
+    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    DatabaseImportPreview, DatabaseImportResult, ImportPdfInput, ImportPdfResult,
+    MoveOutlineNodeInput, RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput,
+    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
     UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
     WorkspaceSnapshot,
 };
@@ -639,6 +639,14 @@ pub fn update_reading_note(
 #[tauri::command]
 pub fn update_card(input: UpdateCardInput, state: State<'_, AppState>) -> AppResult<()> {
     state.lock()?.update_card(input)
+}
+
+#[tauri::command]
+pub fn batch_update_cards(
+    input: BatchUpdateCardsInput,
+    state: State<'_, AppState>,
+) -> AppResult<usize> {
+    state.lock()?.batch_update_cards(input)
 }
 
 #[tauri::command]

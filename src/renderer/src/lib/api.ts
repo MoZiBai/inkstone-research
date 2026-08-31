@@ -10,6 +10,7 @@ import type {
   CreateResearchRoleInput,
   BackupCleanupResult,
   BackupManagerState,
+  BatchUpdateCardsInput,
   DatabaseImportResult,
   DatabaseImportPreview,
   ImportPdfInput,
@@ -85,6 +86,8 @@ export const api: InkstoneApi = {
   deleteReadingNote: (noteId: string) =>
     invoke<void>('delete_reading_note', { noteId }),
   updateCard: (input: UpdateCardInput) => invoke<void>('update_card', { input }),
+  batchUpdateCards: (input: BatchUpdateCardsInput) =>
+    invoke<number>('batch_update_cards', { input }),
   createResearchRole: (input: CreateResearchRoleInput) =>
     invoke<string>('create_research_role', { input }),
   updateResearchRole: (input: UpdateResearchRoleInput) =>

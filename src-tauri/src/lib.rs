@@ -62,6 +62,7 @@ pub fn run() {
             commands::update_reading_note,
             commands::delete_reading_note,
             commands::update_card,
+            commands::batch_update_cards,
             commands::create_research_role,
             commands::update_research_role,
             commands::set_research_role_archived,

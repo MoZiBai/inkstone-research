@@ -19,6 +19,7 @@ import {
   PencilLine,
   Plus,
   RefreshCw,
+  Search,
   ScrollText,
   Settings2,
   ShieldCheck,
@@ -28,7 +29,7 @@ import {
   Upload
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type {
   BackupManagerState,
   BackupRecord,
@@ -44,6 +45,12 @@ import { ReadingView, type ReadingFocusRequest } from './features/reading/Readin
 import { parsePdfLocator } from './features/reading/pdfLocator'
 import { SynthesisView } from './features/synthesis/SynthesisView'
 import { api } from './lib/api'
+import {
+  filterAndSortProjects,
+  searchCurrentProject,
+  type ProjectFilter,
+  type ProjectSort
+} from './lib/workspaceEfficiency'
 import type { NoticeKind, RunMutation } from './types'
 
 type ViewId = 'reading' | 'library' | 'synthesis' | 'outline'
@@ -90,6 +97,12 @@ export default function App(): React.JSX.Element {
   const [readingRequest, setReadingRequest] = useState<ReadingFocusRequest | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
   const [fontSize, setFontSize] = useState<FontSize>(loadFontSize)
+  const [projectQuery, setProjectQuery] = useState('')
+  const [projectFilter, setProjectFilter] = useState<ProjectFilter>('all')
+  const [projectSort, setProjectSort] = useState<ProjectSort>('updated')
+  const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const deferredProjectQuery = useDeferredValue(projectQuery)
+  const deferredProjectSearchQuery = useDeferredValue(projectSearchQuery)
 
   const notify = useCallback((message: string, kind: NoticeKind = 'success'): void => {
     const notice = { message, kind }
@@ -167,6 +180,17 @@ export default function App(): React.JSX.Element {
     () => snapshot?.projects.find((project) => project.id === snapshot.currentProjectId) ?? null,
     [snapshot]
   )
+  const visibleProjects = useMemo(
+    () => filterAndSortProjects(snapshot?.projects ?? [], deferredProjectQuery, projectFilter, projectSort),
+    [deferredProjectQuery, projectFilter, projectSort, snapshot?.projects]
+  )
+  const projectSearchResults = useMemo(
+    () => snapshot
+      ? searchCurrentProject(snapshot, deferredProjectSearchQuery)
+      : { documents: [], cards: [] },
+    [deferredProjectSearchQuery, snapshot]
+  )
+  const projectSearchOpen = Boolean(projectSearchQuery.trim())
 
   const switchProject = async (projectId: string): Promise<void> => {
     if (projectId === snapshot?.currentProjectId || mutating) return
@@ -411,8 +435,42 @@ export default function App(): React.JSX.Element {
           </button>
         </div>
 
+        <div className="project-list-tools">
+          <label className="sidebar-search-box">
+            <Search size={14} />
+            <input
+              value={projectQuery}
+              onChange={(event) => setProjectQuery(event.target.value)}
+              placeholder="搜索项目"
+              aria-label="搜索项目"
+            />
+          </label>
+          <div className="project-list-selects">
+            <select
+              value={projectFilter}
+              onChange={(event) => setProjectFilter(event.target.value as ProjectFilter)}
+              aria-label="筛选项目"
+            >
+              <option value="all">全部项目</option>
+              <option value="documents">有文献</option>
+              <option value="cards">有卡片</option>
+              <option value="empty">空项目</option>
+            </select>
+            <select
+              value={projectSort}
+              onChange={(event) => setProjectSort(event.target.value as ProjectSort)}
+              aria-label="项目排序"
+            >
+              <option value="updated">最近更新</option>
+              <option value="name">名称</option>
+              <option value="documents">文献数</option>
+              <option value="cards">卡片数</option>
+            </select>
+          </div>
+        </div>
+
         <nav className="project-navigation" aria-label="研究项目">
-          {snapshot.projects.map((project) => (
+          {visibleProjects.map((project) => (
             <button
               className={`project-navigation-item ${
                 project.id === snapshot.currentProjectId ? 'active' : ''
@@ -434,6 +492,9 @@ export default function App(): React.JSX.Element {
               </span>
             </button>
           ))}
+          {visibleProjects.length === 0 && snapshot.projects.length > 0 ? (
+            <p className="project-list-empty">没有符合条件的项目</p>
+          ) : null}
         </nav>
 
         <footer className="sidebar-footer">
@@ -541,6 +602,68 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
           <div className="topbar-tools">
+            {currentProject ? (
+              <div
+                className="project-global-search"
+                onBlur={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setProjectSearchQuery('')
+                }}
+              >
+                <label>
+                  <Search size={15} />
+                  <input
+                    value={projectSearchQuery}
+                    onChange={(event) => setProjectSearchQuery(event.target.value)}
+                    placeholder="搜索当前项目"
+                    aria-label="搜索当前项目的文献和卡片"
+                  />
+                </label>
+                {projectSearchOpen ? (
+                  <div className="project-global-search-results">
+                    {projectSearchResults.documents.length > 0 ? (
+                      <section>
+                        <header>文献 <span>{projectSearchResults.documents.length}</span></header>
+                        {projectSearchResults.documents.map((document) => (
+                          <button
+                            type="button"
+                            key={document.id}
+                            onClick={() => {
+                              setReadingRequest({ token: Date.now(), documentId: document.id, page: 1, locator: null })
+                              setActiveView('reading')
+                              setProjectSearchQuery('')
+                            }}
+                          >
+                            <BookOpen size={14} />
+                            <span><strong>{document.title}</strong><small>{document.authors || '未知作者'}{document.year ? ` · ${document.year}` : ''}</small></span>
+                          </button>
+                        ))}
+                      </section>
+                    ) : null}
+                    {projectSearchResults.cards.length > 0 ? (
+                      <section>
+                        <header>卡片 <span>{projectSearchResults.cards.length}</span></header>
+                        {projectSearchResults.cards.map((card) => (
+                          <button
+                            type="button"
+                            key={card.id}
+                            onClick={() => {
+                              openSource(card.documentId, card.pdfPage, card.locatorJson)
+                              setProjectSearchQuery('')
+                            }}
+                          >
+                            <FileStack size={14} />
+                            <span><strong>{card.displayText}</strong><small>{card.documentTitle} · {card.comment || card.tags.join(' · ') || '无即时笔记'}</small></span>
+                          </button>
+                        ))}
+                      </section>
+                    ) : null}
+                    {projectSearchResults.documents.length === 0 && projectSearchResults.cards.length === 0 ? (
+                      <p>没有匹配的文献、摘录、即时笔记或标签。</p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="font-size-control" role="group" aria-label="界面字号">
               <Type size={14} />
               {(['small', 'standard', 'large'] as const).map((size) => (

@@ -6,6 +6,7 @@ import {
   LoaderCircle,
   Maximize2,
   MousePointer2,
+  Search,
   Trash2,
   Underline,
   X,
@@ -40,8 +41,13 @@ import {
   type PdfSelection
 } from './pdfLocator'
 import { clampPdfScale, scaleFromCtrlWheel } from './pdfZoom'
+import { findPdfTextMatches, nextPdfSearchIndex, type PdfTextSearchMatch } from './pdfSearch'
 
 GlobalWorkerOptions.workerSrc = workerUrl
+
+const EMPTY_PDF_ANNOTATIONS: PdfAnnotation[] = []
+const EMPTY_PROJECT_CARDS: ProjectCardView[] = []
+const EMPTY_PDF_SEARCH_MATCHES: PdfTextSearchMatch[] = []
 
 interface PdfViewerProps {
   document: DocumentSummary
@@ -99,6 +105,9 @@ export function PdfViewer({
   const scaleRef = useRef(1)
   const zoomFrameRef = useRef<number | null>(null)
   const focusHandledRef = useRef(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const searchGenerationRef = useRef(0)
+  const pageTextCacheRef = useRef(new Map<number, string>())
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [pages, setPages] = useState<PageInfo[]>([])
   const [numPages, setNumPages] = useState(0)
@@ -110,12 +119,37 @@ export function PdfViewer({
   const [selection, setSelection] = useState<PdfSelection | null>(null)
   const [toolbarPosition, setToolbarPosition] = useState<ToolbarPosition | null>(null)
   const [annotationMenu, setAnnotationMenu] = useState<AnnotationMenuState | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchMatches, setSearchMatches] = useState<PdfTextSearchMatch[]>([])
+  const [activeSearchIndex, setActiveSearchIndex] = useState(-1)
+  const [searchState, setSearchState] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle')
 
   const clearSelection = useCallback((): void => {
     setSelection(null)
     setToolbarPosition(null)
     setAnnotationMenu(null)
     window.getSelection()?.removeAllRanges()
+  }, [])
+
+  const closeSearch = useCallback((): void => {
+    searchGenerationRef.current += 1
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchMatches([])
+    setActiveSearchIndex(-1)
+    setSearchState('idle')
+  }, [])
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'f') return
+      event.preventDefault()
+      setSearchOpen(true)
+      window.setTimeout(() => searchInputRef.current?.focus(), 0)
+    }
+    window.addEventListener('keydown', handleFindShortcut)
+    return () => window.removeEventListener('keydown', handleFindShortcut)
   }, [])
 
   useEffect(() => {
@@ -147,6 +181,12 @@ export function PdfViewer({
     setToolbarPosition(null)
     setLoadState('loading')
     setLoadError('')
+    pageTextCacheRef.current.clear()
+    searchGenerationRef.current += 1
+    setSearchQuery('')
+    setSearchMatches([])
+    setActiveSearchIndex(-1)
+    setSearchState('idle')
 
     const load = async (): Promise<void> => {
       try {
@@ -241,6 +281,67 @@ export function PdfViewer({
       pdfRef.current = null
     }
   }, [document.id])
+
+  useEffect(() => {
+    if (!searchOpen || !pdf) return undefined
+    const query = searchQuery.trim().toLocaleLowerCase()
+    const generation = searchGenerationRef.current + 1
+    searchGenerationRef.current = generation
+    if (!query) {
+      setSearchMatches([])
+      setActiveSearchIndex(-1)
+      setSearchState('idle')
+      return undefined
+    }
+
+    const timeout = window.setTimeout(() => {
+      const search = async (): Promise<void> => {
+        setSearchState('searching')
+        const matches: PdfTextSearchMatch[] = []
+        try {
+          for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+            if (searchGenerationRef.current !== generation) return
+            let pageText = pageTextCacheRef.current.get(pageNumber)
+            if (pageText === undefined) {
+              const page = await pdf.getPage(pageNumber)
+              try {
+                const content = await page.getTextContent()
+                pageText = content.items
+                  .map((item) => ('str' in item ? item.str : ''))
+                  .join('')
+                pageTextCacheRef.current.set(pageNumber, pageText)
+              } finally {
+                page.cleanup()
+              }
+            }
+            matches.push(...findPdfTextMatches(
+              pageText,
+              query,
+              pageNumber,
+              matches.length,
+              20_000 - matches.length
+            ))
+            if (matches.length >= 20_000) break
+            if (pageNumber % 8 === 0) {
+              await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+            }
+          }
+          if (searchGenerationRef.current !== generation) return
+          setSearchMatches(matches)
+          setActiveSearchIndex(matches.length > 0 ? 0 : -1)
+          setSearchState('ready')
+        } catch {
+          if (searchGenerationRef.current !== generation) return
+          setSearchMatches([])
+          setActiveSearchIndex(-1)
+          setSearchState('error')
+        }
+      }
+      void search()
+    }, 180)
+
+    return () => window.clearTimeout(timeout)
+  }, [pdf, searchOpen, searchQuery])
 
   useEffect(() => onCurrentPageChange(currentPage), [currentPage, onCurrentPageChange])
 
@@ -407,6 +508,25 @@ export function PdfViewer({
     root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
   }, [])
 
+  const activeSearchMatch = activeSearchIndex >= 0 ? searchMatches[activeSearchIndex] ?? null : null
+
+  useEffect(() => {
+    if (!activeSearchMatch) return undefined
+    setVisiblePages((current) => {
+      if (current.has(activeSearchMatch.pageNumber)) return current
+      const next = new Set(current)
+      next.add(activeSearchMatch.pageNumber)
+      return next
+    })
+    const timeout = window.setTimeout(() => scrollToPage(activeSearchMatch.pageNumber), 40)
+    return () => window.clearTimeout(timeout)
+  }, [activeSearchMatch, scrollToPage])
+
+  const moveSearchResult = (direction: -1 | 1): void => {
+    if (searchMatches.length === 0) return
+    setActiveSearchIndex((current) => nextPdfSearchIndex(current, searchMatches.length, direction))
+  }
+
   useEffect(() => {
     if (!focusToken || focusToken === focusHandledRef.current || pages.length === 0) return
     if (!focusPage || focusPage < 1 || focusPage > pages.length) return
@@ -520,6 +640,16 @@ export function PdfViewer({
     }
     return byPage
   }, [annotations])
+
+  const pageSearchMatches = useMemo(() => {
+    const byPage = new Map<number, PdfTextSearchMatch[]>()
+    for (const match of searchMatches) {
+      const current = byPage.get(match.pageNumber) ?? []
+      current.push(match)
+      byPage.set(match.pageNumber, current)
+    }
+    return byPage
+  }, [searchMatches])
 
   const cardsByPage = useMemo(() => {
     const byPage = new Map<number, ProjectCardView[]>()
@@ -648,10 +778,62 @@ export function PdfViewer({
             <span>适合宽度</span>
           </button>
         </div>
+        <div className="pdf-toolbar-divider" />
+        <button
+          className={`pdf-tool-button text-tool ${searchOpen ? 'active' : ''}`}
+          type="button"
+          onClick={() => {
+            if (searchOpen) closeSearch()
+            else {
+              setSearchOpen(true)
+              window.setTimeout(() => searchInputRef.current?.focus(), 0)
+            }
+          }}
+          title="在当前 PDF 中查找（Ctrl+F）"
+          aria-pressed={searchOpen}
+        >
+          <Search size={14} /><span>查找</span>
+        </button>
         <div className="pdf-toolbar-hint">
           <MousePointer2 size={14} /> 选中文字后可摘录、划线或高亮 · Ctrl + 滚轮缩放
         </div>
       </div>
+
+      {searchOpen ? (
+        <div className="pdf-search-panel" role="search" aria-label="在当前 PDF 中查找">
+          <Search size={15} />
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                moveSearchResult(event.shiftKey ? -1 : 1)
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                closeSearch()
+              }
+            }}
+            placeholder="输入关键词"
+            aria-label="PDF 搜索关键词"
+          />
+          <span className={`pdf-search-count ${searchState === 'error' ? 'error' : ''}`}>
+            {searchState === 'searching'
+              ? '正在检索…'
+              : searchState === 'error'
+                ? '检索失败'
+                : searchMatches.length > 0
+                  ? `${activeSearchIndex + 1} / ${searchMatches.length}`
+                  : searchQuery.trim()
+                    ? '0 / 0'
+                    : '输入后搜索'}
+          </span>
+          <button type="button" disabled={searchMatches.length === 0} onClick={() => moveSearchResult(-1)} aria-label="上一个匹配" title="上一个匹配（Shift+Enter）"><ChevronLeft size={15} /></button>
+          <button type="button" disabled={searchMatches.length === 0} onClick={() => moveSearchResult(1)} aria-label="下一个匹配" title="下一个匹配（Enter）"><ChevronRight size={15} /></button>
+          <button type="button" onClick={closeSearch} aria-label="关闭 PDF 搜索"><X size={15} /></button>
+        </div>
+      ) : null}
 
       <div
         className="pdf-scroll"
@@ -671,8 +853,10 @@ export function PdfViewer({
               pdf={pdf}
               scale={scale}
               visible={visiblePages.has(pageInfo.pageNumber)}
-              annotations={pageAnnotations.get(pageInfo.pageNumber) ?? []}
-              cards={cardsByPage.get(pageInfo.pageNumber) ?? []}
+              annotations={pageAnnotations.get(pageInfo.pageNumber) ?? EMPTY_PDF_ANNOTATIONS}
+              cards={cardsByPage.get(pageInfo.pageNumber) ?? EMPTY_PROJECT_CARDS}
+              searchMatches={pageSearchMatches.get(pageInfo.pageNumber) ?? EMPTY_PDF_SEARCH_MATCHES}
+              activeSearchMatchId={activeSearchMatch?.pageNumber === pageInfo.pageNumber ? activeSearchMatch.id : null}
               onSelection={handleSelection}
               onAnnotationClick={openAnnotationMenu}
               pageRef={pageRefFor(pageInfo.pageNumber)}
@@ -763,6 +947,8 @@ interface PdfPageViewProps {
   visible: boolean
   annotations: PdfAnnotation[]
   cards: ProjectCardView[]
+  searchMatches: PdfTextSearchMatch[]
+  activeSearchMatchId: string | null
   onSelection: (pageNumber: number, pageElement: HTMLDivElement) => void
   onAnnotationClick: (
     pageNumber: number,
@@ -780,6 +966,8 @@ const PdfPageView = memo(function PdfPageView({
   visible,
   annotations,
   cards,
+  searchMatches,
+  activeSearchMatchId,
   onSelection,
   onAnnotationClick,
   pageRef
@@ -788,6 +976,7 @@ const PdfPageView = memo(function PdfPageView({
   const textLayerRef = useRef<HTMLDivElement>(null)
   const textLayerInstanceRef = useRef<TextLayerBuilder | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
+  const [textLayerVersion, setTextLayerVersion] = useState(0)
   const pageWidth = pageInfo.width * scale
   const pageHeight = pageInfo.height * scale
 
@@ -836,6 +1025,7 @@ const PdfPageView = memo(function PdfPageView({
         await textLayer.render({ viewport })
         if (cancelled) return
         textLayerContainer.replaceChildren(textLayer.div)
+        setTextLayerVersion((version) => version + 1)
       } catch (error) {
         if (!cancelled) setRenderError(normalizePdfError(error))
       } finally {
@@ -856,6 +1046,30 @@ const PdfPageView = memo(function PdfPageView({
       page?.cleanup()
     }
   }, [pageInfo.pageNumber, pdf, scale, visible])
+
+  useEffect(() => {
+    const host = textLayerRef.current
+    if (!host) return
+    const spans = Array.from(host.querySelectorAll<HTMLElement>('.textLayer span'))
+    let offset = 0
+    let activeElement: HTMLElement | null = null
+    for (const span of spans) {
+      span.classList.remove('pdf-search-match', 'current')
+      const textLength = span.textContent?.length ?? 0
+      const spanStart = offset
+      const spanEnd = offset + textLength
+      const overlapping = searchMatches.filter((match) => match.start < spanEnd && match.end > spanStart)
+      if (overlapping.length > 0) span.classList.add('pdf-search-match')
+      if (activeSearchMatchId && overlapping.some((match) => match.id === activeSearchMatchId)) {
+        span.classList.add('current')
+        activeElement ??= span
+      }
+      offset = spanEnd
+    }
+    if (activeElement) {
+      window.requestAnimationFrame(() => activeElement?.scrollIntoView({ block: 'center', inline: 'nearest' }))
+    }
+  }, [activeSearchMatchId, searchMatches, textLayerVersion])
 
   const cardCount = cards.length
   return (
