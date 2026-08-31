@@ -3708,7 +3708,7 @@ body.reading-panel-resizing * {
 }
 
 .pdf-page-canvas,
-.pdf-page-shell > .textLayer,
+.pdf-text-layer-host,
 .pdf-user-annotation-layer {
   position: absolute;
   inset: 0;
@@ -3721,6 +3721,18 @@ body.reading-panel-resizing * {
   z-index: 1;
 }
 
+.pdf-text-layer-host {
+  z-index: 3;
+}
+
+.pdf-text-layer-host > .textLayer {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .pdf-user-annotation-layer {
   z-index: 2;
   pointer-events: none;
@@ -3728,7 +3740,7 @@ body.reading-panel-resizing * {
 
 .textLayer {
   color-scheme: only light;
-  z-index: 3;
+  z-index: 0;
   overflow: clip;
   opacity: 1;
   text-align: initial;

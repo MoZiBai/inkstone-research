@@ -15,12 +15,12 @@ import {
 import {
   getDocument,
   GlobalWorkerOptions,
-  TextLayer,
   type PDFDocumentLoadingTask,
   type PDFDocumentProxy,
   type PDFPageProxy,
   type RenderTask
 } from 'pdfjs-dist'
+import { TextLayerBuilder } from 'pdfjs-dist/web/pdf_viewer.mjs'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
@@ -782,7 +782,7 @@ const PdfPageView = memo(function PdfPageView({
 }: PdfPageViewProps): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const textLayerRef = useRef<HTMLDivElement>(null)
-  const textLayerInstanceRef = useRef<TextLayer | null>(null)
+  const textLayerInstanceRef = useRef<TextLayerBuilder | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
   const pageWidth = pageInfo.width * scale
   const pageHeight = pageInfo.height * scale
@@ -825,15 +825,13 @@ const PdfPageView = memo(function PdfPageView({
         })
         await renderTask.promise
         if (cancelled) return
-        const textContent = await page.getTextContent()
-        if (cancelled) return
-        const textLayer = new TextLayer({
-          textContentSource: textContent,
-          container: textLayerContainer,
-          viewport
+        const textLayer = new TextLayerBuilder({
+          pdfPage: page
         })
         textLayerInstanceRef.current = textLayer
-        await textLayer.render()
+        await textLayer.render({ viewport })
+        if (cancelled) return
+        textLayerContainer.replaceChildren(textLayer.div)
       } catch (error) {
         if (!cancelled) setRenderError(normalizePdfError(error))
       } finally {
@@ -892,7 +890,7 @@ const PdfPageView = memo(function PdfPageView({
       {visible ? (
         <>
           <canvas ref={canvasRef} className="pdf-page-canvas" aria-hidden="true" />
-          <div ref={textLayerRef} className="textLayer" />
+          <div ref={textLayerRef} className="pdf-text-layer-host" />
         </>
       ) : (
         <div className="pdf-page-lazy-placeholder">
