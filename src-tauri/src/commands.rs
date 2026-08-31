@@ -11,7 +11,8 @@ use crate::models::{
     CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentInput, CreateOutlineNodeInput,
     CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, DatabaseImportResult,
     ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, RemoveDocumentInput, UpdateCardInput,
-    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineNodeInput, WorkspaceSnapshot,
+    UpdateCategoryInput, UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput,
+    WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -64,6 +65,23 @@ pub fn get_workspace(
 #[tauri::command]
 pub fn create_project(input: CreateProjectInput, state: State<'_, AppState>) -> AppResult<String> {
     state.lock()?.create_project(input)
+}
+
+#[tauri::command]
+pub fn update_project(input: UpdateProjectInput, state: State<'_, AppState>) -> AppResult<()> {
+    state.lock()?.update_project(input)
+}
+
+#[tauri::command]
+pub fn remove_project(project_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let discarded_paths = state.lock()?.remove_project(&project_id)?;
+    for path in discarded_paths {
+        // The database transaction is authoritative. A locked Windows file may
+        // leave an unreferenced copy behind; it must not turn a successful data
+        // deletion into a misleading failure.
+        let _ = discard_managed_pdf(&path, &state.pdf_library_directory);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -152,6 +170,33 @@ pub async fn export_database(
     .await
     .map_err(|error| {
         crate::error::AppError::Validation(format!("数据库导出任务失败：{error}"))
+    })??;
+    Ok(returned_path)
+}
+
+#[tauri::command]
+pub async fn export_project_database(
+    project_id: String,
+    destination_path: String,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let destination = PathBuf::from(destination_path);
+    if paths_refer_to_same_file(&destination, &state.database_path) {
+        return Err(crate::error::AppError::Validation(
+            "不能用项目导出文件覆盖应用正在使用的数据库。".into(),
+        ));
+    }
+    let repository = Arc::clone(&state.repository);
+    let returned_path = destination.to_string_lossy().into_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = repository.lock().map_err(|_| {
+            crate::error::AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+        })?;
+        guard.export_project_database(&project_id, &destination)
+    })
+    .await
+    .map_err(|error| {
+        crate::error::AppError::Validation(format!("项目数据库导出任务失败：{error}"))
     })??;
     Ok(returned_path)
 }

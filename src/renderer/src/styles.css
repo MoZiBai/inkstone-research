@@ -478,6 +478,8 @@ select:focus-visible {
 }
 
 .topbar {
+  position: relative;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -510,6 +512,21 @@ select:focus-visible {
   min-width: 0;
 }
 
+.project-heading-copy {
+  min-width: 0;
+}
+
+.project-heading-title-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.project-heading-title-row h1 {
+  min-width: 0;
+}
+
 .project-heading h1 {
   overflow: hidden;
   margin: 0;
@@ -529,6 +546,96 @@ select:focus-visible {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-actions-anchor {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.project-manage-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 29px;
+  padding: 0 8px;
+  color: var(--ink-600);
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.66);
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.project-manage-button:hover,
+.project-manage-button.active {
+  color: var(--terracotta-dark);
+  border-color: rgba(164, 95, 69, 0.3);
+  background: #fffaf4;
+}
+
+.project-actions-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  left: 0;
+  display: grid;
+  width: 250px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 254, 250, 0.98);
+  box-shadow: 0 14px 35px rgba(29, 39, 34, 0.16);
+  backdrop-filter: blur(12px);
+}
+
+.project-actions-menu > button {
+  display: grid;
+  grid-template-columns: 23px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 9px 8px;
+  color: var(--ink-700);
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.project-actions-menu > button:hover:not(:disabled) {
+  color: var(--ink-950);
+  background: var(--paper-150);
+}
+
+.project-actions-menu > button > svg {
+  margin-top: 2px;
+}
+
+.project-actions-menu > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.project-actions-menu strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-actions-menu small {
+  color: var(--ink-500);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.project-actions-menu > button.danger {
+  color: var(--red);
+}
+
+.project-actions-menu > button.danger:hover {
+  color: var(--red);
+  background: rgba(171, 71, 57, 0.08);
 }
 
 .topbar-tools {
@@ -775,6 +882,11 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.empty-workspace-view {
+  display: grid;
+  place-items: center;
 }
 
 .workspace-view {
@@ -3424,6 +3536,15 @@ body.reading-panel-resizing * {
 
   .project-heading p {
     display: none;
+  }
+
+  .project-manage-button span {
+    display: none;
+  }
+
+  .project-actions-menu {
+    right: 0;
+    left: auto;
   }
 
   .view-tabs {

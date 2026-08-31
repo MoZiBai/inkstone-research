@@ -156,6 +156,10 @@ export interface CreateProjectInput {
   color?: string
 }
 
+export interface UpdateProjectInput extends CreateProjectInput {
+  projectId: string
+}
+
 export interface BibliographicMetadataInput {
   title: string
   authors?: string
@@ -281,6 +285,9 @@ export interface MoveOutlineNodeInput {
 export interface InkstoneApi {
   getWorkspace: (projectId?: string) => Promise<WorkspaceSnapshot>
   createProject: (input: CreateProjectInput) => Promise<string>
+  updateProject: (input: UpdateProjectInput) => Promise<void>
+  removeProject: (projectId: string) => Promise<void>
+  exportProjectDatabase: (projectId: string, destinationPath: string) => Promise<string>
   createDocument: (input: CreateDocumentInput) => Promise<string>
   updateDocument: (input: UpdateDocumentInput) => Promise<void>
   removeDocument: (input: RemoveDocumentInput) => Promise<void>

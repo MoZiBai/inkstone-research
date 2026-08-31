@@ -161,6 +161,16 @@ pub struct CreateProjectInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateProjectInput {
+    pub project_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateDocumentInput {
     pub project_id: String,
     pub title: String,

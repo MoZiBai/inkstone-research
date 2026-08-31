@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Boxes,
+  ChevronDown,
   Database,
   DatabaseBackup,
   Download,
@@ -10,15 +11,18 @@ import {
   LoaderCircle,
   PanelLeftClose,
   PanelLeftOpen,
+  PencilLine,
   Plus,
   ScrollText,
+  Settings2,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { DatabaseImportResult, WorkspaceSnapshot } from '@shared/types'
+import type { DatabaseImportResult, ProjectSummary, WorkspaceSnapshot } from '@shared/types'
 import { ConfirmDialog, Modal } from './components/Modal'
 import { LibraryView } from './features/library/LibraryView'
 import { OutlineView } from './features/outline/OutlineView'
@@ -50,7 +54,9 @@ export default function App(): React.JSX.Element {
   const [mutating, setMutating] = useState(false)
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
-  const [showProjectDialog, setShowProjectDialog] = useState(false)
+  const [projectDialogMode, setProjectDialogMode] = useState<'create' | 'edit' | null>(null)
+  const [showProjectActions, setShowProjectActions] = useState(false)
+  const [removingProject, setRemovingProject] = useState<ProjectSummary | null>(null)
   const [showDatabaseDialog, setShowDatabaseDialog] = useState(false)
   const [databaseBusy, setDatabaseBusy] = useState(false)
   const [pendingDatabaseImport, setPendingDatabaseImport] = useState<string | null>(null)
@@ -154,6 +160,46 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  const exportProjectDatabase = async (): Promise<void> => {
+    if (!currentProject) return
+    try {
+      const destination = await saveDialog({
+        title: `导出项目：${currentProject.name}`,
+        defaultPath: projectDatabaseFileName(currentProject.name),
+        filters: [{ name: '砚台项目数据库', extensions: ['db'] }]
+      })
+      if (typeof destination !== 'string') return
+      setDatabaseBusy(true)
+      await api.exportProjectDatabase(currentProject.id, destination)
+      notify('当前项目数据库已导出；PDF 文件未打包。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setDatabaseBusy(false)
+    }
+  }
+
+  const removeSelectedProject = async (): Promise<void> => {
+    if (!removingProject || mutating) return
+    const nextProjectId = snapshot?.projects.find(
+      (project) => project.id !== removingProject.id
+    )?.id
+    setMutating(true)
+    try {
+      await api.removeProject(removingProject.id)
+      await loadWorkspace(nextProjectId)
+      setRemovingProject(null)
+      setReadingRequest(null)
+      setFocusCardId(null)
+      setActiveView('reading')
+      notify('项目及其项目专属研究数据已删除。')
+    } catch (error) {
+      notify(normalizeError(error))
+    } finally {
+      setMutating(false)
+    }
+  }
+
   const chooseDatabaseImport = async (): Promise<void> => {
     try {
       const source = await openDialog({
@@ -212,7 +258,12 @@ export default function App(): React.JSX.Element {
   }
 
   return (
-    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <div
+      className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+      onContextMenu={(event) => {
+        if (!allowsNativeContextMenu(event.target)) event.preventDefault()
+      }}
+    >
       <aside className="sidebar">
         <header className="brand">
           <span className="brand-seal">砚</span>
@@ -227,7 +278,7 @@ export default function App(): React.JSX.Element {
           <button
             className="icon-button subtle"
             type="button"
-            onClick={() => setShowProjectDialog(true)}
+            onClick={() => setProjectDialogMode('create')}
             aria-label="新建项目"
           >
             <Plus size={15} />
@@ -286,8 +337,80 @@ export default function App(): React.JSX.Element {
         <header className="topbar">
           <div className="project-heading">
             <span className="project-color" style={{ backgroundColor: currentProject?.color }} />
-            <div>
-              <h1>{currentProject?.name ?? '新研究项目'}</h1>
+            <div className="project-heading-copy">
+              <div className="project-heading-title-row">
+                <h1>{currentProject?.name ?? '尚未创建研究项目'}</h1>
+                {currentProject ? (
+                  <div
+                    className="project-actions-anchor"
+                    onBlur={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setShowProjectActions(false)
+                      }
+                    }}
+                  >
+                    <button
+                      className={`project-manage-button ${showProjectActions ? 'active' : ''}`}
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={showProjectActions}
+                      onClick={() => setShowProjectActions((visible) => !visible)}
+                    >
+                      <Settings2 size={14} />
+                      <span>项目操作</span>
+                      <ChevronDown size={13} />
+                    </button>
+                    {showProjectActions ? (
+                      <div className="project-actions-menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setShowProjectActions(false)
+                            setProjectDialogMode('edit')
+                          }}
+                        >
+                          <PencilLine size={15} />
+                          <span>
+                            <strong>编辑项目信息</strong>
+                            <small>修改名称、说明和标识色</small>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={databaseBusy}
+                          onClick={() => {
+                            setShowProjectActions(false)
+                            void exportProjectDatabase()
+                          }}
+                        >
+                          <Download size={15} />
+                          <span>
+                            <strong>导出此项目</strong>
+                            <small>保存仅包含当前项目的 SQLite 数据库</small>
+                          </span>
+                        </button>
+                        <button
+                          className="danger"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setShowProjectActions(false)
+                            setRemovingProject(currentProject)
+                          }}
+                        >
+                          <Trash2 size={15} />
+                          <span>
+                            <strong>删除项目</strong>
+                            <small>删除前会再次确认</small>
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
               <p>{currentProject?.description || '从阅读材料开始建立可追溯的论文证据。'}</p>
             </div>
           </div>
@@ -321,6 +444,7 @@ export default function App(): React.JSX.Element {
                 className={activeView === tab.id ? 'active' : ''}
                 key={tab.id}
                 type="button"
+                disabled={!currentProject}
                 onClick={() => setActiveView(tab.id)}
               >
                 <Icon size={15} />
@@ -332,7 +456,22 @@ export default function App(): React.JSX.Element {
         </nav>
 
         <section className="view-container">
-          {activeView === 'reading' ? (
+          {!currentProject ? (
+            <div className="workspace-view empty-workspace-view">
+              <div className="empty-state">
+                <FolderKanban size={27} />
+                <h3>从一个研究项目开始</h3>
+                <p>项目可以对应一篇论文、一个章节或任何独立研究任务。</p>
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => setProjectDialogMode('create')}
+                >
+                  <Plus size={15} /> 新建项目
+                </button>
+              </div>
+            </div>
+          ) : activeView === 'reading' ? (
             <ReadingView
               snapshot={snapshot}
               runMutation={runMutation}
@@ -341,7 +480,7 @@ export default function App(): React.JSX.Element {
               onFocusHandled={() => setReadingRequest(null)}
             />
           ) : null}
-          {activeView === 'library' ? (
+          {currentProject && activeView === 'library' ? (
             <LibraryView
               snapshot={snapshot}
               runMutation={runMutation}
@@ -349,7 +488,7 @@ export default function App(): React.JSX.Element {
               onOpenSource={openSource}
             />
           ) : null}
-          {activeView === 'synthesis' ? (
+          {currentProject && activeView === 'synthesis' ? (
             <SynthesisView
               snapshot={snapshot}
               runMutation={runMutation}
@@ -359,15 +498,31 @@ export default function App(): React.JSX.Element {
               onOpenSource={openSource}
             />
           ) : null}
-          {activeView === 'outline' ? (
+          {currentProject && activeView === 'outline' ? (
             <OutlineView snapshot={snapshot} runMutation={runMutation} onOpenSource={openSource} />
           ) : null}
         </section>
       </main>
 
-      {showProjectDialog ? (
+      {projectDialogMode ? (
         <ProjectDialog
-          onCreate={async (name, description, color) => {
+          project={projectDialogMode === 'edit' ? currentProject : null}
+          busy={mutating}
+          onSubmit={async (name, description, color) => {
+            if (projectDialogMode === 'edit' && currentProject) {
+              const succeeded = await runMutation(
+                () => api.updateProject({
+                  projectId: currentProject.id,
+                  name,
+                  description,
+                  color
+                }),
+                '项目信息已更新。'
+              )
+              if (succeeded) setProjectDialogMode(null)
+              return
+            }
+
             let newProjectId: string | null = null
             const succeeded = await runMutation(
               async () => {
@@ -377,11 +532,24 @@ export default function App(): React.JSX.Element {
             )
             if (succeeded && newProjectId) {
               await loadWorkspace(newProjectId)
-              setShowProjectDialog(false)
+              setProjectDialogMode(null)
               setActiveView('reading')
             }
           }}
-          onClose={() => setShowProjectDialog(false)}
+          onClose={() => setProjectDialogMode(null)}
+        />
+      ) : null}
+
+      {removingProject ? (
+        <ConfirmDialog
+          title={`删除项目“${removingProject.name}”？`}
+          description="该项目专属的卡片、批注、阅读笔记、二次整理和论文提纲会一并永久删除；仍被其他项目引用的文献会保留。此操作无法撤销，建议先导出此项目。"
+          confirmLabel={mutating ? '正在删除…' : '删除项目'}
+          dangerous
+          onConfirm={() => void removeSelectedProject()}
+          onCancel={() => {
+            if (!mutating) setRemovingProject(null)
+          }}
         />
       ) : null}
 
@@ -500,25 +668,32 @@ function DatabaseImportResultDialog({
 }
 
 interface ProjectDialogProps {
-  onCreate: (name: string, description: string, color: string) => Promise<void>
+  project: ProjectSummary | null
+  busy: boolean
+  onSubmit: (name: string, description: string, color: string) => Promise<void>
   onClose: () => void
 }
 
-function ProjectDialog({ onCreate, onClose }: ProjectDialogProps): React.JSX.Element {
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [color, setColor] = useState('#a05d43')
+function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps): React.JSX.Element {
+  const [name, setName] = useState(project?.name ?? '')
+  const [description, setDescription] = useState(project?.description ?? '')
+  const [color, setColor] = useState(project?.color ?? '#a05d43')
+  const editing = Boolean(project)
 
   return (
     <Modal
-      title="新建研究项目"
-      subtitle="项目可以是一篇论文、一个章节或其他研究任务，不预设类型。"
+      title={editing ? '编辑研究项目' : '新建研究项目'}
+      subtitle={
+        editing
+          ? '项目信息修改后，已有文献、卡片与提纲结构不会改变。'
+          : '项目可以是一篇论文、一个章节或其他研究任务，不预设类型。'
+      }
       onClose={onClose}
     >
       <form
         onSubmit={(event) => {
           event.preventDefault()
-          void onCreate(name, description, color)
+          if (!busy) void onSubmit(name, description, color)
         }}
       >
         <label className="field">
@@ -547,11 +722,12 @@ function ProjectDialog({ onCreate, onClose }: ProjectDialogProps): React.JSX.Ele
           <code>{color}</code>
         </label>
         <div className="modal-actions">
-          <button className="button ghost" type="button" onClick={onClose}>
+          <button className="button ghost" type="button" disabled={busy} onClick={onClose}>
             取消
           </button>
-          <button className="button primary" type="submit">
-            <FileStack size={15} /> 创建项目
+          <button className="button primary" type="submit" disabled={busy}>
+            {editing ? <PencilLine size={15} /> : <FileStack size={15} />}
+            {busy ? '正在保存…' : editing ? '保存修改' : '创建项目'}
           </button>
         </div>
       </form>
@@ -582,6 +758,24 @@ function databaseBackupFileName(): string {
   const date = new Date()
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `砚台数据库备份-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.db`
+}
+
+function projectDatabaseFileName(projectName: string): string {
+  const date = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const safeName = projectName
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+    .replace(/[. ]+$/g, '')
+    .slice(0, 80) || '未命名项目'
+  return `砚台项目-${safeName}-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.db`
+}
+
+function allowsNativeContextMenu(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest('input, textarea, [contenteditable="true"], [role="textbox"]'))
+  )
 }
 
 function fileName(path: string): string {

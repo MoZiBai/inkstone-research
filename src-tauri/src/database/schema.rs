@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Result};
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub fn migrate_database(connection: &mut Connection) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -220,15 +220,40 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
             ALTER TABLE project_cards ADD COLUMN text_override TEXT NOT NULL DEFAULT '';
             "#,
         )?;
+        connection.pragma_update(None, "user_version", 5)?;
+    }
+
+    if current_version < 6 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS app_metadata (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
+            "#,
+        )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     Ok(())
 }
 
 pub fn seed_database(connection: &mut Connection) -> Result<()> {
+    let initialized: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_metadata WHERE key = 'database_initialized')",
+        [],
+        |row| row.get(0),
+    )?;
+    if initialized == 1 {
+        return Ok(());
+    }
+
     let project_count: i64 =
         connection.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
     if project_count > 0 {
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES ('database_initialized', '1')",
+            [],
+        )?;
         return Ok(());
     }
 
@@ -396,6 +421,9 @@ pub fn seed_database(connection: &mut Connection) -> Result<()> {
           ('seed-link-1', 'seed-outline-1', 'seed-card-3', '', 1000, '2026-08-30T00:00:00Z'),
           ('seed-link-2', 'seed-outline-2', 'seed-card-1', '', 1000, '2026-08-30T00:00:00Z'),
           ('seed-link-3', 'seed-outline-2-1', 'seed-card-4', '', 1000, '2026-08-30T00:00:00Z');
+
+        INSERT INTO app_metadata (key, value)
+        VALUES ('database_initialized', '1');
         "#,
     )?;
     transaction.commit()?;

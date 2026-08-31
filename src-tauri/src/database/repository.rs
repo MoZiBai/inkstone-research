@@ -15,7 +15,7 @@ use crate::models::{
     ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink, OutlineNode,
     OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
     RemoveDocumentInput, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentInput, UpdateOutlineNodeInput, WorkspaceSnapshot,
+    UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput, WorkspaceSnapshot,
 };
 
 use super::schema::{migrate_database, seed_database, SCHEMA_VERSION};
@@ -374,6 +374,85 @@ impl Repository {
         )?;
         transaction.commit()?;
         Ok(project_id)
+    }
+
+    pub fn update_project(&mut self, input: UpdateProjectInput) -> AppResult<()> {
+        let name = required_text(&input.name, "项目名称")?;
+        let description = limited_text(&input.description, "项目说明", 20_000)?;
+        let color = validated_color(input.color.as_deref().unwrap_or("#9a5d45"))?;
+        let changed = self.connection.execute(
+            r#"
+            UPDATE projects
+            SET name = ?1, description = ?2, color = ?3, updated_at = ?4
+            WHERE id = ?5
+            "#,
+            params![name, description, color, timestamp(), input.project_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("项目".into()));
+        }
+        Ok(())
+    }
+
+    pub fn remove_project(&mut self, project_id: &str) -> AppResult<Vec<PathBuf>> {
+        ensure_project_exists(&self.connection, project_id)?;
+        let transaction = self.connection.transaction()?;
+        let candidate_documents = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT d.id, d.file_path
+                FROM project_documents pd
+                JOIN documents d ON d.id = pd.document_id
+                WHERE pd.project_id = ?1
+                "#,
+            )?;
+            let rows = statement.query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        transaction.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+        let mut discarded_paths = BTreeSet::new();
+        for (document_id, file_path) in candidate_documents {
+            let still_referenced: i64 = transaction.query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1 FROM project_documents WHERE document_id = ?1
+                  UNION ALL
+                  SELECT 1 FROM project_cards pc
+                  JOIN source_excerpts se ON se.id = pc.excerpt_id
+                  WHERE se.document_id = ?1
+                  UNION ALL
+                  SELECT 1 FROM pdf_annotations WHERE document_id = ?1
+                  UNION ALL
+                  SELECT 1 FROM reading_notes WHERE document_id = ?1
+                )
+                "#,
+                params![document_id],
+                |row| row.get(0),
+            )?;
+            if still_referenced == 1 {
+                continue;
+            }
+            transaction.execute(
+                "DELETE FROM source_excerpts WHERE document_id = ?1",
+                params![document_id],
+            )?;
+            transaction.execute("DELETE FROM documents WHERE id = ?1", params![document_id])?;
+            if let Some(path) = file_path {
+                let path_references: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM documents WHERE file_path = ?1",
+                    params![path],
+                    |row| row.get(0),
+                )?;
+                if path_references == 0 {
+                    discarded_paths.insert(PathBuf::from(path));
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(discarded_paths.into_iter().collect())
     }
 
     pub fn create_document(&mut self, input: CreateDocumentInput) -> AppResult<String> {
@@ -780,6 +859,63 @@ impl Repository {
         let temporary = parent.join(format!(".inkstone-export-{}.tmp", Uuid::new_v4()));
         let result = (|| -> AppResult<()> {
             create_database_copy(&self.connection, &temporary)?;
+            validate_database_file(&temporary)?;
+            replace_file(&temporary, destination)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub fn export_project_database(&self, project_id: &str, destination: &Path) -> AppResult<()> {
+        ensure_project_exists(&self.connection, project_id)?;
+        let parent = destination
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .ok_or_else(|| AppError::Validation("备份目标目录不存在。".into()))?;
+        let temporary = parent.join(format!(".inkstone-project-export-{}.tmp", Uuid::new_v4()));
+        let result = (|| -> AppResult<()> {
+            create_database_copy(&self.connection, &temporary)?;
+            {
+                let mut exported = Connection::open(&temporary)?;
+                exported.pragma_update(None, "foreign_keys", "ON")?;
+                let transaction = exported.transaction()?;
+                transaction.execute("DELETE FROM projects WHERE id <> ?1", params![project_id])?;
+                transaction.execute(
+                    r#"
+                    DELETE FROM source_excerpts
+                    WHERE NOT EXISTS(
+                      SELECT 1 FROM project_cards pc WHERE pc.excerpt_id = source_excerpts.id
+                    )
+                    "#,
+                    [],
+                )?;
+                transaction.execute(
+                    r#"
+                    DELETE FROM documents
+                    WHERE NOT EXISTS(
+                      SELECT 1 FROM project_documents pd WHERE pd.document_id = documents.id
+                    )
+                      AND NOT EXISTS(
+                        SELECT 1 FROM source_excerpts se WHERE se.document_id = documents.id
+                      )
+                      AND NOT EXISTS(
+                        SELECT 1 FROM pdf_annotations pa WHERE pa.document_id = documents.id
+                      )
+                      AND NOT EXISTS(
+                        SELECT 1 FROM reading_notes rn WHERE rn.document_id = documents.id
+                      )
+                    "#,
+                    [],
+                )?;
+                transaction.commit()?;
+                ensure_foreign_keys_are_valid(&exported)?;
+                exported.execute_batch(
+                    "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+                )?;
+            }
             validate_database_file(&temporary)?;
             replace_file(&temporary, destination)?;
             Ok(())
@@ -1641,6 +1777,9 @@ fn validate_database_file(path: &Path) -> AppResult<()> {
     }
     if version >= 4 {
         required_tables.push("reading_notes");
+    }
+    if version >= 6 {
+        required_tables.push("app_metadata");
     }
     for table in required_tables {
         let exists: i64 = connection.query_row(
@@ -2653,6 +2792,165 @@ mod tests {
         assert!(snapshot.outline_links.iter().any(|link| {
             link.project_card_id == "seed-card-4" && link.outline_node_id == second_node
         }));
+    }
+
+    #[test]
+    fn updating_project_persists_name_description_and_color() {
+        let mut repository = Repository::memory().expect("memory database");
+        repository
+            .update_project(UpdateProjectInput {
+                project_id: "seed-project-tombs".into(),
+                name: "墓葬空间研究（修订）".into(),
+                description: "更新后的研究范围与说明。".into(),
+                color: Some("#456789".into()),
+            })
+            .expect("update project");
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after project update");
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == "seed-project-tombs")
+            .expect("updated project");
+        assert_eq!(project.name, "墓葬空间研究（修订）");
+        assert_eq!(project.description, "更新后的研究范围与说明。");
+        assert_eq!(project.color, "#456789");
+    }
+
+    #[test]
+    fn removing_project_preserves_other_project_and_shared_document() {
+        let mut repository = Repository::memory().expect("memory database");
+        repository
+            .connection
+            .execute(
+                r#"
+                INSERT INTO project_documents (project_id, document_id, sort_order, created_at)
+                VALUES ('seed-project-regions', 'seed-document-space', 2000, '2026-08-30T00:00:00Z')
+                "#,
+                [],
+            )
+            .expect("share document with second project");
+
+        repository
+            .remove_project("seed-project-tombs")
+            .expect("remove first project");
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-regions"))
+            .expect("remaining workspace");
+        assert_eq!(snapshot.projects.len(), 1);
+        assert_eq!(
+            snapshot.current_project_id.as_deref(),
+            Some("seed-project-regions")
+        );
+        assert!(snapshot
+            .documents
+            .iter()
+            .any(|document| document.id == "seed-document-space"));
+        assert!(snapshot
+            .cards
+            .iter()
+            .all(|card| card.project_id == "seed-project-regions"));
+
+        let removed_project_rows: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = 'seed-project-tombs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count removed project");
+        let removed_unique_document_rows: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = 'seed-document-ritual'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count removed unique document");
+        assert_eq!(removed_project_rows, 0);
+        assert_eq!(removed_unique_document_rows, 0);
+        ensure_foreign_keys_are_valid(&repository.connection).expect("foreign keys after removal");
+    }
+
+    #[test]
+    fn removing_all_projects_does_not_restore_examples_after_reopen() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-empty-workspace")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create empty workspace directory");
+        let database_path = root.join("inkstone.db");
+
+        {
+            let mut repository = Repository::open(&database_path).expect("open database");
+            repository
+                .remove_project("seed-project-tombs")
+                .expect("remove first seed project");
+            repository
+                .remove_project("seed-project-regions")
+                .expect("remove second seed project");
+            assert!(repository
+                .get_workspace(None)
+                .expect("empty workspace")
+                .projects
+                .is_empty());
+        }
+
+        {
+            let repository = Repository::open(&database_path).expect("reopen empty database");
+            let snapshot = repository.get_workspace(None).expect("reopened workspace");
+            assert!(snapshot.projects.is_empty());
+            assert!(snapshot.current_project_id.is_none());
+        }
+
+        fs::remove_dir_all(root).expect("remove empty workspace directory");
+    }
+
+    #[test]
+    fn project_database_export_contains_only_selected_project() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-project-export")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create project export directory");
+        let source_path = root.join("source.db");
+        let export_path = root.join("project.db");
+
+        {
+            let source = Repository::open(&source_path).expect("open source repository");
+            source
+                .export_project_database("seed-project-tombs", &export_path)
+                .expect("export selected project");
+        }
+
+        {
+            let exported = Repository::open(&export_path).expect("open project export");
+            let snapshot = exported
+                .get_workspace(Some("seed-project-tombs"))
+                .expect("load exported project");
+            assert_eq!(snapshot.projects.len(), 1);
+            assert_eq!(snapshot.projects[0].id, "seed-project-tombs");
+            assert!(!snapshot
+                .documents
+                .iter()
+                .any(|document| document.id == "seed-document-region"));
+            let unrelated_excerpts: i64 = exported
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM source_excerpts WHERE document_id = 'seed-document-region'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count unrelated excerpts");
+            assert_eq!(unrelated_excerpts, 0);
+            ensure_foreign_keys_are_valid(&exported.connection)
+                .expect("foreign keys in project export");
+        }
+
+        fs::remove_dir_all(root).expect("remove project export directory");
     }
 
     #[test]

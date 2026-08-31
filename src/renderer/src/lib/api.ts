@@ -17,6 +17,7 @@ import type {
   UpdateCategoryInput,
   UpdateDocumentInput,
   UpdateOutlineNodeInput,
+  UpdateProjectInput,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -25,6 +26,12 @@ export const api: InkstoneApi = {
     invoke<WorkspaceSnapshot>('get_workspace', { projectId }),
   createProject: (input: CreateProjectInput) =>
     invoke<string>('create_project', { input }),
+  updateProject: (input: UpdateProjectInput) =>
+    invoke<void>('update_project', { input }),
+  removeProject: (projectId: string) =>
+    invoke<void>('remove_project', { projectId }),
+  exportProjectDatabase: (projectId: string, destinationPath: string) =>
+    invoke<string>('export_project_database', { projectId, destinationPath }),
   createDocument: (input: CreateDocumentInput) =>
     invoke<string>('create_document', { input }),
   updateDocument: (input: UpdateDocumentInput) =>
