@@ -12,7 +12,8 @@ use crate::models::{
     CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
     DatabaseImportResult, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput,
     RemoveDocumentInput, UpdateCardInput, UpdateCategoryInput, UpdateDocumentInput,
-    UpdateOutlineNodeInput, UpdateProjectInput, UpdateResearchRoleInput, WorkspaceSnapshot,
+    UpdateOutlineCardLinkInput, UpdateOutlineNodeInput, UpdatePdfAnnotationInput,
+    UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -349,6 +350,14 @@ pub fn delete_pdf_annotation(annotation_id: String, state: State<'_, AppState>) 
 }
 
 #[tauri::command]
+pub fn update_pdf_annotation(
+    input: UpdatePdfAnnotationInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_pdf_annotation(input)
+}
+
+#[tauri::command]
 pub fn create_reading_note(
     input: CreateReadingNoteInput,
     state: State<'_, AppState>,
@@ -359,6 +368,14 @@ pub fn create_reading_note(
 #[tauri::command]
 pub fn delete_reading_note(note_id: String, state: State<'_, AppState>) -> AppResult<()> {
     state.lock()?.delete_reading_note(&note_id)
+}
+
+#[tauri::command]
+pub fn update_reading_note(
+    input: UpdateReadingNoteInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_reading_note(input)
 }
 
 #[tauri::command]
@@ -492,6 +509,14 @@ pub fn link_card_to_outline(
 #[tauri::command]
 pub fn remove_outline_link(link_id: String, state: State<'_, AppState>) -> AppResult<()> {
     state.lock()?.remove_outline_link(&link_id)
+}
+
+#[tauri::command]
+pub fn update_outline_card_link(
+    input: UpdateOutlineCardLinkInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state.lock()?.update_outline_card_link(input)
 }
 
 #[tauri::command]

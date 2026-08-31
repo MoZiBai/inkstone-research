@@ -3,6 +3,7 @@ import type { OutlineNode } from '@shared/types'
 export interface FlatOutlineNode {
   node: OutlineNode
   depth: number
+  number: string
 }
 
 export function flattenOutline(
@@ -28,22 +29,25 @@ export function flattenOutline(
       hideDescendants(child.id)
     }
   }
-  const appendNode = (node: OutlineNode, depth: number): void => {
+  const appendNode = (node: OutlineNode, depth: number, number: string): void => {
     if (visited.has(node.id)) return
     visited.add(node.id)
-    result.push({ node, depth })
+    result.push({ node, depth, number })
     if (collapsedNodeIds.has(node.id)) hideDescendants(node.id)
-    else append(node.id, depth + 1)
+    else append(node.id, depth + 1, `${number}.`)
   }
-  const append = (parentId: string | null, depth: number): void => {
-    for (const node of children.get(parentId) ?? []) {
-      appendNode(node, depth)
+  const append = (parentId: string | null, depth: number, prefix: string): void => {
+    for (const [index, node] of (children.get(parentId) ?? []).entries()) {
+      appendNode(node, depth, `${prefix}${index + 1}`)
     }
   }
-  append(null, 0)
+  append(null, 0, '')
 
+  let orphanIndex = (children.get(null) ?? []).length + 1
   for (const node of nodes) {
-    appendNode(node, 0)
+    if (visited.has(node.id)) continue
+    appendNode(node, 0, String(orphanIndex))
+    orphanIndex += 1
   }
   return result
 }

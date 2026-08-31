@@ -248,6 +248,12 @@ export interface CreatePdfAnnotationInput {
   comment?: string
 }
 
+export interface UpdatePdfAnnotationInput {
+  annotationId: string
+  color: string
+  comment: string
+}
+
 export interface CreateReadingNoteInput {
   projectId: string
   documentId: string
@@ -256,6 +262,11 @@ export interface CreateReadingNoteInput {
   selectedText?: string
   pageNumber?: number | null
   locatorJson?: string
+}
+
+export interface UpdateReadingNoteInput {
+  noteId: string
+  content: string
 }
 
 export interface UpdateCardInput {
@@ -311,6 +322,11 @@ export interface MoveOutlineNodeInput {
   placement: OutlinePlacement
 }
 
+export interface UpdateOutlineCardLinkInput {
+  linkId: string
+  note: string
+}
+
 export interface InkstoneApi {
   getWorkspace: (projectId?: string) => Promise<WorkspaceSnapshot>
   createProject: (input: CreateProjectInput) => Promise<string>
@@ -329,8 +345,10 @@ export interface InkstoneApi {
   revealPdfInFileManager: (documentId: string) => Promise<void>
   createCardFromSelection: (input: CreateCardFromSelectionInput) => Promise<string>
   createPdfAnnotation: (input: CreatePdfAnnotationInput) => Promise<string>
+  updatePdfAnnotation: (input: UpdatePdfAnnotationInput) => Promise<void>
   deletePdfAnnotation: (annotationId: string) => Promise<void>
   createReadingNote: (input: CreateReadingNoteInput) => Promise<string>
+  updateReadingNote: (input: UpdateReadingNoteInput) => Promise<void>
   deleteReadingNote: (noteId: string) => Promise<void>
   updateCard: (input: UpdateCardInput) => Promise<void>
   createResearchRole: (input: CreateResearchRoleInput) => Promise<string>
@@ -349,6 +367,7 @@ export interface InkstoneApi {
   moveOutlineNode: (input: MoveOutlineNodeInput) => Promise<void>
   deleteOutlineNode: (nodeId: string) => Promise<void>
   linkCardToOutline: (nodeId: string, cardId: string) => Promise<string>
+  updateOutlineCardLink: (input: UpdateOutlineCardLinkInput) => Promise<void>
   removeOutlineLink: (linkId: string) => Promise<void>
   moveOutlineCard: (linkId: string, direction: -1 | 1) => Promise<void>
 }

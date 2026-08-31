@@ -128,8 +128,10 @@ export function ReadingView({
     selection: PdfSelection | null
   } | null>(null)
   const [deletingNote, setDeletingNote] = useState<ReadingNote | null>(null)
+  const [editingNote, setEditingNote] = useState<ReadingNote | null>(null)
   const [focusRequest, setFocusRequest] = useState<ReadingFocusRequest | null>(initialRequest ?? null)
   const [deletingAnnotation, setDeletingAnnotation] = useState<PdfAnnotation | null>(null)
+  const [editingAnnotation, setEditingAnnotation] = useState<PdfAnnotation | null>(null)
   const [currentPdfPage, setCurrentPdfPage] = useState(1)
   const [collapsedInspectorSections, setCollapsedInspectorSections] = useState<
     Set<ReadingInspectorSection>
@@ -449,6 +451,15 @@ export function ReadingView({
     if (succeeded) setDeletingNote(null)
   }
 
+  const updateReadingNote = async (content: string): Promise<void> => {
+    if (!editingNote) return
+    const succeeded = await runMutation(
+      () => api.updateReadingNote({ noteId: editingNote.id, content }),
+      `${editingNote.kind === 'insight' ? '灵感' : '质疑'}笔记已更新。`
+    )
+    if (succeeded) setEditingNote(null)
+  }
+
   const createCard = async (selection: PdfSelection): Promise<void> => {
     if (!snapshot.currentProjectId || !selectedDocument) return
     setPendingCard({ selection, initialComment: '', sourceReadingNoteId: null })
@@ -518,6 +529,15 @@ export function ReadingView({
       'PDF 批注已移除。'
     )
     if (succeeded) setDeletingAnnotation(null)
+  }
+
+  const updateAnnotation = async (color: string, comment: string): Promise<void> => {
+    if (!editingAnnotation) return
+    const succeeded = await runMutation(
+      () => api.updatePdfAnnotation({ annotationId: editingAnnotation.id, color, comment }),
+      'PDF 批注已更新。'
+    )
+    if (succeeded) setEditingAnnotation(null)
   }
 
   return (
@@ -854,6 +874,15 @@ export function ReadingView({
                                 <FilePlus2 size={12} /> 转为卡片
                               </button>
                             ) : null}
+                            <button
+                              className="annotation-delete"
+                              type="button"
+                              aria-label="编辑阅读笔记"
+                              title="编辑"
+                              onClick={() => setEditingNote(note)}
+                            >
+                              <FilePenLine size={13} />
+                            </button>
                             <button className="annotation-delete" type="button" aria-label="删除阅读笔记" onClick={() => setDeletingNote(note)}>
                               <Trash2 size={13} />
                             </button>
@@ -941,6 +970,7 @@ export function ReadingView({
                           annotation={annotation}
                           currentPage
                           onLocate={focusDocumentLocation}
+                          onEdit={setEditingAnnotation}
                           onDelete={setDeletingAnnotation}
                         />
                       ))}
@@ -952,6 +982,7 @@ export function ReadingView({
                           key={annotation.id}
                           annotation={annotation}
                           onLocate={focusDocumentLocation}
+                          onEdit={setEditingAnnotation}
                           onDelete={setDeletingAnnotation}
                         />
                       ))}
@@ -1049,6 +1080,14 @@ export function ReadingView({
         />
       ) : null}
 
+      {editingAnnotation ? (
+        <PdfAnnotationEditDialog
+          annotation={editingAnnotation}
+          onSave={updateAnnotation}
+          onClose={() => setEditingAnnotation(null)}
+        />
+      ) : null}
+
       {removingDocument ? (
         <DocumentRemovalDialog
           document={removingDocument}
@@ -1064,8 +1103,20 @@ export function ReadingView({
         <ReadingNoteDialog
           kind={pendingNote.kind}
           selection={pendingNote.selection}
+          initialContent=""
           onSave={saveReadingNote}
           onClose={() => setPendingNote(null)}
+        />
+      ) : null}
+
+      {editingNote ? (
+        <ReadingNoteDialog
+          kind={editingNote.kind}
+          selection={selectionFromReadingNote(editingNote)}
+          initialContent={editingNote.content}
+          editing
+          onSave={updateReadingNote}
+          onClose={() => setEditingNote(null)}
         />
       ) : null}
 
@@ -1119,6 +1170,7 @@ interface ReadingAnnotationItemProps {
   annotation: PdfAnnotation
   currentPage?: boolean
   onLocate: (documentId: string, page: number | null, locatorJson: string) => void
+  onEdit: (annotation: PdfAnnotation) => void
   onDelete: (annotation: PdfAnnotation) => void
 }
 
@@ -1126,6 +1178,7 @@ function ReadingAnnotationItem({
   annotation,
   currentPage = false,
   onLocate,
+  onEdit,
   onDelete
 }: ReadingAnnotationItemProps): React.JSX.Element {
   return (
@@ -1134,7 +1187,7 @@ function ReadingAnnotationItem({
         type="button"
         onClick={() => onLocate(annotation.documentId, annotation.pageNumber, annotation.locatorJson)}
       >
-        <span className={`annotation-kind ${annotation.kind}`}>
+        <span className={`annotation-kind ${annotation.kind}`} style={{ '--annotation-color': annotation.color } as React.CSSProperties}>
           {annotation.kind === 'highlight' ? <Highlighter size={13} /> : <Underline size={13} />}
         </span>
         <span>
@@ -1142,7 +1195,17 @@ function ReadingAnnotationItem({
           <small>
             {currentPage ? '当前页 · ' : ''}第 {annotation.pageNumber} 页 · 点击定位
           </small>
+          {annotation.comment ? <em>{annotation.comment}</em> : null}
         </span>
+      </button>
+      <button
+        className="annotation-delete"
+        type="button"
+        aria-label="编辑批注"
+        title="编辑颜色与评论"
+        onClick={() => onEdit(annotation)}
+      >
+        <FilePenLine size={13} />
       </button>
       <button
         className="annotation-delete"
@@ -1154,6 +1217,61 @@ function ReadingAnnotationItem({
         <Trash2 size={13} />
       </button>
     </article>
+  )
+}
+
+interface PdfAnnotationEditDialogProps {
+  annotation: PdfAnnotation
+  onSave: (color: string, comment: string) => Promise<void>
+  onClose: () => void
+}
+
+function PdfAnnotationEditDialog({
+  annotation,
+  onSave,
+  onClose
+}: PdfAnnotationEditDialogProps): React.JSX.Element {
+  const [color, setColor] = useState(annotation.color)
+  const [comment, setComment] = useState(annotation.comment)
+  const [saving, setSaving] = useState(false)
+
+  return (
+    <Modal
+      title={`编辑${annotation.kind === 'highlight' ? '高亮' : '下划线'}批注`}
+      subtitle={`PDF 第 ${annotation.pageNumber} 页 · 原文位置保持不变`}
+      onClose={onClose}
+      width="large"
+    >
+      <form onSubmit={(event) => {
+        event.preventDefault()
+        setSaving(true)
+        void onSave(color, comment).finally(() => setSaving(false))
+      }}>
+        <blockquote className="dialog-quote compact">{annotation.selectedText || '未记录选中文字'}</blockquote>
+        <label className="field color-field">
+          <span>批注颜色</span>
+          <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
+          <code>{color}</code>
+        </label>
+        <label className="field">
+          <span>批注评论（可选）</span>
+          <textarea
+            rows={5}
+            maxLength={20_000}
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="记录这处标记需要注意的内容……"
+          />
+        </label>
+        <div className="modal-actions">
+          <button className="button ghost" type="button" onClick={onClose}>取消</button>
+          <button className="button primary" type="submit" disabled={saving}>
+            {saving ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}
+            保存批注
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 
@@ -1428,18 +1546,27 @@ function DocumentRemovalDialog({
 interface ReadingNoteDialogProps {
   kind: ReadingNoteKind
   selection: PdfSelection | null
+  initialContent: string
+  editing?: boolean
   onSave: (content: string) => Promise<void>
   onClose: () => void
 }
 
-function ReadingNoteDialog({ kind, selection, onSave, onClose }: ReadingNoteDialogProps): React.JSX.Element {
-  const [content, setContent] = useState('')
+function ReadingNoteDialog({
+  kind,
+  selection,
+  initialContent,
+  editing = false,
+  onSave,
+  onClose
+}: ReadingNoteDialogProps): React.JSX.Element {
+  const [content, setContent] = useState(initialContent)
   const [saving, setSaving] = useState(false)
   const isInsight = kind === 'insight'
   return (
     <Modal
-      title={isInsight ? '记录阅读灵感' : '记录对作者观点的质疑'}
-      subtitle={selection ? `关联 PDF 第 ${selection.pageNumber} 页的当前选区` : '作为当前文献的独立阅读笔记保存'}
+      title={editing ? `编辑${isInsight ? '灵感' : '质疑'}笔记` : isInsight ? '记录阅读灵感' : '记录对作者观点的质疑'}
+      subtitle={selection ? `关联 PDF 第 ${selection.pageNumber} 页的原文位置保持不变` : '当前文献的独立阅读笔记'}
       onClose={onClose}
       width="large"
     >
@@ -1471,7 +1598,7 @@ function ReadingNoteDialog({ kind, selection, onSave, onClose }: ReadingNoteDial
           <button className="button ghost" type="button" onClick={onClose}>取消</button>
           <button className="button primary" type="submit" disabled={saving || !content.trim()}>
             {saving ? <LoaderCircle className="spin" size={15} /> : isInsight ? <Lightbulb size={15} /> : <MessageCircleQuestion size={15} />}
-            保存{isInsight ? '灵感' : '质疑'}
+            {editing ? '保存修改' : `保存${isInsight ? '灵感' : '质疑'}`}
           </button>
         </div>
       </form>

@@ -17,8 +17,11 @@ import type {
   UpdateCardInput,
   UpdateCategoryInput,
   UpdateDocumentInput,
+  UpdateOutlineCardLinkInput,
   UpdateOutlineNodeInput,
+  UpdatePdfAnnotationInput,
   UpdateProjectInput,
+  UpdateReadingNoteInput,
   UpdateResearchRoleInput,
   WorkspaceSnapshot
 } from '@shared/types'
@@ -57,10 +60,14 @@ export const api: InkstoneApi = {
     invoke<string>('create_card_from_selection', { input }),
   createPdfAnnotation: (input: CreatePdfAnnotationInput) =>
     invoke<string>('create_pdf_annotation', { input }),
+  updatePdfAnnotation: (input: UpdatePdfAnnotationInput) =>
+    invoke<void>('update_pdf_annotation', { input }),
   deletePdfAnnotation: (annotationId: string) =>
     invoke<void>('delete_pdf_annotation', { annotationId }),
   createReadingNote: (input: CreateReadingNoteInput) =>
     invoke<string>('create_reading_note', { input }),
+  updateReadingNote: (input: UpdateReadingNoteInput) =>
+    invoke<void>('update_reading_note', { input }),
   deleteReadingNote: (noteId: string) =>
     invoke<void>('delete_reading_note', { noteId }),
   updateCard: (input: UpdateCardInput) => invoke<void>('update_card', { input }),
@@ -95,6 +102,8 @@ export const api: InkstoneApi = {
     invoke<void>('delete_outline_node', { nodeId }),
   linkCardToOutline: (nodeId: string, cardId: string) =>
     invoke<string>('link_card_to_outline', { nodeId, cardId }),
+  updateOutlineCardLink: (input: UpdateOutlineCardLinkInput) =>
+    invoke<void>('update_outline_card_link', { input }),
   removeOutlineLink: (linkId: string) =>
     invoke<void>('remove_outline_link', { linkId }),
   moveOutlineCard: (linkId: string, direction: -1 | 1) =>

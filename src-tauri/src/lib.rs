@@ -49,8 +49,10 @@ pub fn run() {
             commands::reveal_pdf_in_file_manager,
             commands::create_card_from_selection,
             commands::create_pdf_annotation,
+            commands::update_pdf_annotation,
             commands::delete_pdf_annotation,
             commands::create_reading_note,
+            commands::update_reading_note,
             commands::delete_reading_note,
             commands::update_card,
             commands::create_research_role,
@@ -69,6 +71,7 @@ pub fn run() {
             commands::move_outline_node,
             commands::delete_outline_node,
             commands::link_card_to_outline,
+            commands::update_outline_card_link,
             commands::remove_outline_link,
             commands::move_outline_card
         ])

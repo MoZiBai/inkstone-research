@@ -326,6 +326,13 @@ export function LibraryView({
         <CardEditDialog
           card={editingCard}
           researchRoles={snapshot.researchRoles}
+          outlineUsages={snapshot.outlineLinks
+            .filter((link) => link.projectCardId === editingCard.id)
+            .map((link) => ({
+              linkId: link.id,
+              nodeTitle: snapshot.outlineNodes.find((node) => node.id === link.outlineNodeId)?.title ?? '未知章节',
+              note: link.note
+            }))}
           onSave={saveCard}
           onClose={() => setEditingCard(null)}
           onOpenSource={() => onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson)}

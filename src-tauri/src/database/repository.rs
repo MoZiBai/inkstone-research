@@ -15,7 +15,8 @@ use crate::models::{
     DocumentSummary, ImportPdfInput, ImportPdfResult, MoveOutlineNodeInput, OutlineCardLink,
     OutlineNode, OutlinePlacement, PdfAnnotation, ProjectCardView, ProjectSummary, ReadingNote,
     RemoveDocumentInput, ResearchRole, SynthesisCategory, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentInput, UpdateOutlineNodeInput, UpdateProjectInput, UpdateResearchRoleInput,
+    UpdateDocumentInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
     WorkspaceSnapshot,
 };
 
@@ -1284,6 +1285,19 @@ impl Repository {
         Ok(())
     }
 
+    pub fn update_pdf_annotation(&mut self, input: UpdatePdfAnnotationInput) -> AppResult<()> {
+        let color = validated_color(&input.color)?;
+        let comment = limited_text(&input.comment, "批注评论", 20_000)?;
+        let changed = self.connection.execute(
+            "UPDATE pdf_annotations SET color = ?1, comment = ?2, updated_at = ?3 WHERE id = ?4",
+            params![color, comment, timestamp(), input.annotation_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("PDF 批注".into()));
+        }
+        Ok(())
+    }
+
     pub fn create_reading_note(&mut self, input: CreateReadingNoteInput) -> AppResult<String> {
         if !["insight", "critique"].contains(&input.kind.as_str()) {
             return Err(AppError::Validation("阅读笔记类型无效。".into()));
@@ -1340,6 +1354,18 @@ impl Repository {
         let changed = self
             .connection
             .execute("DELETE FROM reading_notes WHERE id = ?1", params![note_id])?;
+        if changed == 0 {
+            return Err(AppError::NotFound("阅读笔记".into()));
+        }
+        Ok(())
+    }
+
+    pub fn update_reading_note(&mut self, input: UpdateReadingNoteInput) -> AppResult<()> {
+        let content = required_long_text(&input.content, "阅读笔记", 20_000)?;
+        let changed = self.connection.execute(
+            "UPDATE reading_notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, timestamp(), input.note_id],
+        )?;
         if changed == 0 {
             return Err(AppError::NotFound("阅读笔记".into()));
         }
@@ -1927,6 +1953,18 @@ impl Repository {
         let changed = self.connection.execute(
             "DELETE FROM outline_card_links WHERE id = ?1",
             params![link_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound("章节卡片关联".into()));
+        }
+        Ok(())
+    }
+
+    pub fn update_outline_card_link(&mut self, input: UpdateOutlineCardLinkInput) -> AppResult<()> {
+        let note = limited_text(&input.note, "章节内使用说明", 20_000)?;
+        let changed = self.connection.execute(
+            "UPDATE outline_card_links SET note = ?1 WHERE id = ?2",
+            params![note, input.link_id],
         )?;
         if changed == 0 {
             return Err(AppError::NotFound("章节卡片关联".into()));
@@ -2835,6 +2873,90 @@ mod tests {
                 .cards
                 .len(),
             5
+        );
+    }
+
+    #[test]
+    fn reading_notes_annotations_and_outline_link_notes_can_be_edited_in_place() {
+        let mut repository = Repository::memory().expect("memory database");
+        repository
+            .connection
+            .execute(
+                "UPDATE documents SET file_path = 'managed.pdf', file_hash = 'hash' WHERE id = 'seed-document-space'",
+                [],
+            )
+            .expect("attach test PDF metadata");
+        let note_id = repository
+            .create_reading_note(CreateReadingNoteInput {
+                project_id: "seed-project-tombs".into(),
+                document_id: "seed-document-space".into(),
+                kind: "insight".into(),
+                content: "初始灵感".into(),
+                selected_text: String::new(),
+                page_number: None,
+                locator_json: String::new(),
+            })
+            .expect("create note");
+        repository
+            .update_reading_note(UpdateReadingNoteInput {
+                note_id: note_id.clone(),
+                content: "修订后的灵感".into(),
+            })
+            .expect("update note");
+
+        let annotation_id = repository
+            .create_pdf_annotation(CreatePdfAnnotationInput {
+                project_id: "seed-project-tombs".into(),
+                document_id: "seed-document-space".into(),
+                kind: "highlight".into(),
+                page_number: 17,
+                color: "#e8bd55".into(),
+                selected_text: "批注原文".into(),
+                locator_json: r#"{"version":1,"page":17,"rects":[{"x":0.1,"y":0.2,"width":0.3,"height":0.04}]}"#.into(),
+                comment: String::new(),
+            })
+            .expect("create annotation");
+        repository
+            .update_pdf_annotation(UpdatePdfAnnotationInput {
+                annotation_id: annotation_id.clone(),
+                color: "#a45f45".into(),
+                comment: "补充的批注评论".into(),
+            })
+            .expect("update annotation");
+        repository
+            .update_outline_card_link(UpdateOutlineCardLinkInput {
+                link_id: "seed-link-1".into(),
+                note: "用于本章界定研究方法的边界。".into(),
+            })
+            .expect("update outline link note");
+
+        let snapshot = repository
+            .get_workspace(Some("seed-project-tombs"))
+            .expect("workspace after edits");
+        assert_eq!(
+            snapshot
+                .reading_notes
+                .iter()
+                .find(|note| note.id == note_id)
+                .expect("updated note")
+                .content,
+            "修订后的灵感"
+        );
+        let annotation = snapshot
+            .pdf_annotations
+            .iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .expect("updated annotation");
+        assert_eq!(annotation.color, "#a45f45");
+        assert_eq!(annotation.comment, "补充的批注评论");
+        assert_eq!(
+            snapshot
+                .outline_links
+                .iter()
+                .find(|link| link.id == "seed-link-1")
+                .expect("updated link")
+                .note,
+            "用于本章界定研究方法的边界。"
         );
     }
 

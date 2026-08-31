@@ -26,11 +26,11 @@ describe('flattenOutline', () => {
       node('section-a-1', 'chapter-a', 1000)
     ])
 
-    expect(result.map(({ node: item, depth }) => [item.id, depth])).toEqual([
-      ['chapter-a', 0],
-      ['section-a-1', 1],
-      ['section-a-2', 1],
-      ['chapter-b', 0]
+    expect(result.map(({ node: item, depth, number }) => [item.id, depth, number])).toEqual([
+      ['chapter-a', 0, '1'],
+      ['section-a-1', 1, '1.1'],
+      ['section-a-2', 1, '1.2'],
+      ['chapter-b', 0, '2']
     ])
   })
 

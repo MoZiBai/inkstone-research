@@ -325,6 +325,15 @@ pub struct CreatePdfAnnotationInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdatePdfAnnotationInput {
+    pub annotation_id: String,
+    pub color: String,
+    #[serde(default)]
+    pub comment: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateReadingNoteInput {
     pub project_id: String,
     pub document_id: String,
@@ -335,6 +344,13 @@ pub struct CreateReadingNoteInput {
     pub page_number: Option<i64>,
     #[serde(default)]
     pub locator_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateReadingNoteInput {
+    pub note_id: String,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,6 +422,13 @@ pub struct MoveOutlineNodeInput {
     pub node_id: String,
     pub target_node_id: String,
     pub placement: OutlinePlacement,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateOutlineCardLinkInput {
+    pub link_id: String,
+    pub note: String,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]

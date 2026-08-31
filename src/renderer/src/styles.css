@@ -4673,6 +4673,64 @@ body.reading-panel-resizing * {
   gap: 6px;
 }
 
+.card-outline-usages {
+  margin: 0 0 16px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(247, 245, 239, 0.48);
+}
+
+.card-outline-usages h3 {
+  margin: 0 0 9px;
+  color: var(--ink-700);
+  font-size: 13px;
+}
+
+.card-outline-usages ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card-outline-usages li {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  background: white;
+}
+
+.card-outline-usages li span,
+.card-outline-usages > p {
+  margin: 0;
+  color: var(--ink-500);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.outline-evidence-open em,
+.reading-annotation-item em {
+  overflow: hidden;
+  color: var(--ink-600);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reading-annotation-item {
+  grid-template-columns: minmax(0, 1fr) 25px 25px;
+}
+
+.annotation-kind[style] {
+  color: var(--annotation-color);
+  background: color-mix(in srgb, var(--annotation-color) 18%, white);
+}
+
 @media (max-width: 760px) {
   .research-role-editor {
     grid-template-columns: 1fr;

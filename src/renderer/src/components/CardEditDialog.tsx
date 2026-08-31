@@ -5,6 +5,7 @@ import { Modal } from './Modal'
 interface CardEditDialogProps {
   card: ProjectCardView
   researchRoles: ResearchRole[]
+  outlineUsages?: Array<{ linkId: string; nodeTitle: string; note: string }>
   onSave: (input: UpdateCardInput) => Promise<void>
   onClose: () => void
   onOpenSource?: () => void
@@ -19,6 +20,7 @@ const originLabels: Record<ProjectCardView['originKind'], string> = {
 export function CardEditDialog({
   card,
   researchRoles,
+  outlineUsages = [],
   onSave,
   onClose,
   onOpenSource
@@ -154,6 +156,21 @@ export function CardEditDialog({
             来源：{card.documentTitle} · PDF 第 {card.pdfPage ?? '—'} 页 · 原文定位已保存
           </p>
         </details>
+        <section className="card-outline-usages">
+          <h3>提纲使用位置</h3>
+          {outlineUsages.length > 0 ? (
+            <ul>
+              {outlineUsages.map((usage) => (
+                <li key={usage.linkId}>
+                  <strong>{usage.nodeTitle}</strong>
+                  <span>{usage.note || '尚未填写章节内使用说明'}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>这张卡片尚未关联到论文提纲。</p>
+          )}
+        </section>
         <div className="modal-actions">
           {onOpenSource ? (
             <button className="button secondary source-dialog-action" type="button" onClick={onOpenSource}>

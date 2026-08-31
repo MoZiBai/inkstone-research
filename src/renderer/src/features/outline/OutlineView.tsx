@@ -17,6 +17,7 @@ import {
 import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type {
   CreateOutlineNodeInput,
+  OutlineCardLink,
   OutlineNode,
   OutlinePlacement,
   ProjectCardView,
@@ -62,6 +63,7 @@ export function OutlineView({
   const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [viewingCard, setViewingCard] = useState<ProjectCardView | null>(null)
+  const [editingLink, setEditingLink] = useState<OutlineCardLink | null>(null)
   const [cardQuery, setCardQuery] = useState('')
   const [hideLinkedToSelected, setHideLinkedToSelected] = useState(false)
   const deferredCardQuery = useDeferredValue(cardQuery.trim().toLocaleLowerCase())
@@ -162,7 +164,7 @@ export function OutlineView({
             <span>{snapshot.outlineNodes.length} 个章节节点</span>
           </div>
 
-          {flatNodes.map(({ node, depth }) => {
+          {flatNodes.map(({ node, depth, number }) => {
             const links = indexes.linksByNodeId.get(node.id) ?? []
             const childCount = childCountByNodeId.get(node.id) ?? 0
             const canCollapse = childCount > 0 || links.length > 0
@@ -219,7 +221,7 @@ export function OutlineView({
                     {canCollapse ? (collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />) : null}
                   </button>
                   <span className="outline-index" style={{ borderColor: isSelected ? '#a35f43' : undefined }}>
-                    {depth + 1}
+                    {number}
                   </span>
                   <div className="outline-copy">
                     <div className="outline-title-line">
@@ -291,8 +293,16 @@ export function OutlineView({
                               {card.documentAuthors || '未知作者'} · 第{' '}
                               {card.printPage ?? card.pdfPage ?? '—'} 页
                             </small>
+                            {link.note ? <em>{link.note}</em> : null}
                           </button>
                           <div className="evidence-actions">
+                            <button
+                              type="button"
+                              onClick={() => setEditingLink(link)}
+                              title="编辑章节内使用说明"
+                            >
+                              <Edit3 size={12} />
+                            </button>
                             <button
                               type="button"
                               disabled={linkIndex === 0}
@@ -449,6 +459,13 @@ export function OutlineView({
         <CardEditDialog
           card={viewingCard}
           researchRoles={snapshot.researchRoles}
+          outlineUsages={snapshot.outlineLinks
+            .filter((link) => link.projectCardId === viewingCard.id)
+            .map((link) => ({
+              linkId: link.id,
+              nodeTitle: snapshot.outlineNodes.find((node) => node.id === link.outlineNodeId)?.title ?? '未知章节',
+              note: link.note
+            }))}
           onSave={saveViewingCard}
           onClose={() => setViewingCard(null)}
           onOpenSource={() => onOpenSource(viewingCard.documentId, viewingCard.pdfPage, viewingCard.locatorJson)}
@@ -462,6 +479,14 @@ export function OutlineView({
           onClose={() => setNodeDialog(null)}
         />
       ) : null}
+      {editingLink ? (
+        <OutlineLinkNoteDialog
+          link={editingLink}
+          chapterTitle={indexes.nodesById.get(editingLink.outlineNodeId)?.title ?? '当前章节'}
+          runMutation={runMutation}
+          onClose={() => setEditingLink(null)}
+        />
+      ) : null}
       {deletingNode ? (
         <ConfirmDialog
           title="删除这个章节？"
@@ -473,6 +498,58 @@ export function OutlineView({
         />
       ) : null}
     </div>
+  )
+}
+
+interface OutlineLinkNoteDialogProps {
+  link: OutlineCardLink
+  chapterTitle: string
+  runMutation: RunMutation
+  onClose: () => void
+}
+
+function OutlineLinkNoteDialog({
+  link,
+  chapterTitle,
+  runMutation,
+  onClose
+}: OutlineLinkNoteDialogProps): React.JSX.Element {
+  const [note, setNote] = useState(link.note)
+
+  const submit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault()
+    const succeeded = await runMutation(
+      () => api.updateOutlineCardLink({ linkId: link.id, note }),
+      '章节内使用说明已保存。'
+    )
+    if (succeeded) onClose()
+  }
+
+  return (
+    <Modal
+      title="章节内使用说明"
+      subtitle={chapterTitle}
+      onClose={onClose}
+      width="large"
+    >
+      <form onSubmit={(event) => void submit(event)}>
+        <label className="field">
+          <span>这张卡片在本节如何使用</span>
+          <textarea
+            autoFocus
+            rows={7}
+            maxLength={20_000}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="可以记录它与本节论点的关系、使用方式，或仍需核查的问题……"
+          />
+        </label>
+        <div className="modal-actions">
+          <button className="button ghost" type="button" onClick={onClose}>取消</button>
+          <button className="button primary" type="submit">保存说明</button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 
