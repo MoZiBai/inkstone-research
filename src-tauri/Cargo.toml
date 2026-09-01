@@ -1,7 +1,7 @@
 [package]
 name = "inkstone-research"
 version = "0.1.0"
-description = "砚台：面向历史学与考古学研究者的本地研究卡片工作台"
+description = "砚台：面向深度阅读、资料摘录与想法整理的本地卡片工作台"
 authors = ["Inkstone Research"]
 edition = "2021"
 
