@@ -1,75 +1,88 @@
 # 砚台（Inkstone Research Desk）
 
-砚台是一款面向深度阅读、资料摘录与想法整理的 Windows 本地卡片工作台。它适合所有希望在阅读中持续记录、追溯和组织想法的用户：以项目管理 PDF 文献、摘录、批注和阅读思考，再把卡片经过二次整理后关联到用户自己创建的多级写作提纲。
+砚台是一款面向深度阅读、资料摘录与想法整理的 Windows 本地卡片工作台。它帮助你在阅读 PDF 时保存原文片段、批注、灵感和质疑，再通过卡片库、整理分类和自定义提纲，把零散记录逐步组织成自己的知识结构。
 
-这是一套 Tauri + React + Rust + SQLite 的真实桌面应用工程，不是一次性 HTML Demo。核心数据默认只保存在本机，PDF 原件不会被修改。
+## 适合谁
 
-## 当前阶段
+- 需要长期阅读论文、书籍或报告的人；
+- 希望保留原文出处，同时记录个人理解和问题的人；
+- 需要把阅读材料整理成文章、课程或研究提纲的人；
+- 重视本地存储、可追溯性和数据掌控的人。
 
-第一阶段的本地研究工作台已经具备：
+## 主要功能
 
-- 创建和切换同级研究项目；
-- 登记文献书目信息；
-- 按来源文献查看项目全部卡片；
-- 编辑项目内评论、标签和卡片作用；
-- 创建、改名、着色、排序与安全删除整理分类；
-- 拖拽分类，剔除和恢复卡片；
-- 创建、编辑、删除与拖拽多级提纲；
-- 将同一卡片关联到多个章节，并独立调整或移除关联；
-- 使用真实 SQLite 事务持久化，关闭数据库后重新打开仍能恢复状态。
+- 按项目管理不同的阅读和写作任务；
+- 导入 PDF，在阅读台中翻页、搜索、缩放和选择文字；
+- 保存高亮、下划线、灵感和质疑，并可回到原文位置；
+- 将摘录保存为卡片，分别保留原始选区文字和可编辑的记录内容；
+- 在卡片库中按文献浏览全部卡片；
+- 在二次整理中建立分类、移动卡片、剔除或恢复卡片；
+- 创建多级写作提纲，让同一张卡片关联到多个章节；
+- 使用本地 SQLite 持久化，并提供完整数据库备份、项目备份和托盘自动备份。
 
-第二阶段（PDF 阅读与可追溯摘录）已部分实现：
+## 快速开始
 
-- 通过系统文件选择器导入 PDF；按 SHA-256 在应用数据目录保存只读副本，重复文件复用；
-- 使用 PDF.js 连续滚动阅读，支持页码跳转、上一页/下一页、缩放和适合宽度；
-- 文字型 PDF 支持文字层选择；选区可创建研究卡片，保存页码、印刷页码、坐标、前后文和文件哈希；
-- 选区可保存高亮或下划线，批注在应用重启后恢复，并可从右侧列表定位或移除；
-- 支持 Ctrl + 鼠标滚轮缩放；制卡时可修正 OCR 摘录文字，同时保留原始选区和定位；
-- 关联原文的灵感或质疑可复用现有流程转为卡片，独立阅读笔记仍会保留；
-- 卡片库、二次整理和论文提纲中的“查看原文”可以回到对应 PDF 页和选区附近。
-- 可导出或导入完整 SQLite 数据库备份；PDF 缺失时保留研究数据并允许重新链接。
+### 从源码运行
 
-空数据库会写入带“示例项目”标识的种子数据，用于验证状态流。新建项目不会自动生成固定章节。
+开发环境需要：
 
-尚未实现的能力会在界面中明确标注：扫描件 OCR、PDF 全文索引与跨页/模糊反向定位、确定性复制格式清理、NoteExpress 等外部导入，以及 Markdown/Word 导出。项目不包含 WPS 剪贴板入口或自由画布。
-
-## 技术栈
-
-- Tauri 2 / Windows WebView2
-- React 19 / TypeScript / Vite
-- Rust stable / `rusqlite` bundled SQLite
-- Vitest、Rust tests、rustfmt、Clippy
-
-详细说明见 [产品说明](docs/PRODUCT.md)、[数据模型](docs/DATA_MODEL.md)、[技术架构](docs/ARCHITECTURE.md) 与 [阶段计划](docs/ROADMAP.md)。
-
-## 开发环境
-
-需要 Node.js 22+、pnpm、rustup，以及带 C++ x64 工具的 Visual Studio 2022 Build Tools。Rust 工具链安装在仓库内的 `.toolchains`，项目脚本不会修改系统 PATH。
+- Windows 10/11；
+- Node.js 22 或更高版本；
+- pnpm；
+- Rust stable、rustup；
+- Visual Studio 2022 Build Tools（包含 C++ x64 工具）。
 
 ```powershell
 pnpm install
 pnpm setup:rust
+pnpm dev
 ```
 
-本机已经存在项目内 Rust 工具链时，不需要重复执行 `pnpm setup:rust`。
+如果本机已经配置好项目所需的 Rust 工具链，可以跳过 `pnpm setup:rust`。
 
-## 常用命令
+### 构建 Windows 应用
 
 ```powershell
-pnpm dev          # 启动 Tauri 开发窗口
-pnpm typecheck    # TypeScript 类型检查
-pnpm test         # 前端纯逻辑测试
-pnpm test:rust    # SQLite 与业务不变量测试
-pnpm lint:rust    # Clippy，警告视为错误
-pnpm format:rust  # Rust 格式化
-pnpm build:web    # 构建 WebView 前端
-pnpm build        # 生成 Windows release 可执行文件
+pnpm build
 ```
 
-发布构建输出到 `src-tauri/target/release/inkstone-research.exe`。
+构建结果位于 `src-tauri/target/release/inkstone-research.exe`。
 
-## 本地数据
+## 基本使用
 
-正式运行时数据库位于 Tauri 的应用数据目录，文件名为 `inkstone.db`；导入的 PDF 副本位于同目录下的 `pdf-library/<sha256>.pdf`。Windows 通常对应当前用户 Roaming AppData 下的 `com.inkstone.research` 目录。SQLite 启用外键、WAL 与事务保护。
+1. 新建一个项目，为一次阅读或写作任务命名。
+2. 在阅读台导入 PDF，并补充标题、作者、年份等书目信息。
+3. 阅读时选择文字，可以创建卡片、保存高亮或添加下划线。
+4. 在卡片详情中补充自己的理解、标签和研究作用；OCR 质量不理想时，可以直接修改卡片中的显示文字。
+5. 在卡片库回顾某篇文献的全部摘录，在二次整理中按主题或用途重新分类。
+6. 在论文提纲中创建章、节和小节，把需要使用的卡片建立关联。
 
-顶部“备份与恢复”入口可导出完整 SQLite 快照并安全导入；PDF 文件不打包，恢复后缺失的 PDF 可在阅读台重新链接。JSON/Markdown 可移植备份仍属于后续阶段。
+## 数据与隐私
+
+砚台默认在本机保存数据，不要求云端账号，也不会修改导入的 PDF 原件。应用会在自己的数据目录中保存 SQLite 数据库和按文件哈希管理的 PDF 副本。备份功能只备份数据库内容，PDF 原件需要在恢复后重新链接。
+
+关闭窗口时可以选择隐藏到托盘或直接退出。隐藏到托盘后应用仍会运行，自动备份继续计时；完全退出后自动备份停止。
+
+## 当前版本
+
+当前版本已经支持项目、文献、卡片、批注、二次整理、论文提纲、PDF 阅读和本地备份恢复。扫描件 OCR、PDF 全文索引、跨页精确定位、确定性复制格式清理、NoteExpress 导入以及 Markdown/Word 导出仍在后续规划中。
+
+## 项目文档
+
+- [产品与使用指南](docs/PRODUCT.md)
+- [技术架构](docs/ARCHITECTURE.md)
+- [数据模型](docs/DATA_MODEL.md)
+- [公开路线图](docs/ROADMAP.md)
+
+## 开发与测试
+
+```powershell
+pnpm typecheck       # TypeScript 类型检查
+pnpm test            # 前端逻辑测试
+pnpm test:rust       # Rust 与 SQLite 测试
+pnpm lint:rust       # Clippy 检查
+pnpm format:rust     # Rust 格式化
+pnpm build:web       # 构建前端资源
+```
+
+砚台目前处于持续开发阶段。许可证将在首次公开发布前补充，公开使用和再分发请以届时的许可证文件为准。
