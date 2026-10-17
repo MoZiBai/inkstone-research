@@ -186,7 +186,7 @@ export function BulkCardActions({
         <form data-unsaved={tagDraft.trim() ? 'true' : undefined} className="bulk-tag-popover" onSubmit={(event) => void submitAddedTags(event)}>
           <div>
             <strong>添加标签</strong>
-            <small>以逗号分隔，将应用到所选 {count} 张卡片</small>
+            <small>回车或逗号添加标签，将应用到所选 {count} 张卡片</small>
           </div>
           <TagInput value={tagDraft} onChange={setTagDraft} suggestions={allProjectTags} />
           <div className="bulk-tag-popover-actions">

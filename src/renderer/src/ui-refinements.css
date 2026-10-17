@@ -45,3 +45,38 @@
 .board-column.collapsed .column-tools button:not(:first-child) { display: none; }
 .board-column.collapsed .column-header { flex-wrap: wrap; }
 @media (max-width: 1050px) { .outline-layout { grid-template-columns: minmax(260px, 1fr) 7px 240px; } }
+
+/* Reading edits keep the source visible and use the existing save/cancel flow. */
+.reading-composer-backdrop { justify-items: end; align-items: stretch; padding: 16px; background: rgba(22, 30, 27, 0.06); backdrop-filter: none; }
+.reading-composer-backdrop .modal-card { width: min(470px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--line); border-radius: 12px; box-shadow: -12px 0 36px rgba(22, 30, 27, 0.13); }
+.reading-composer-backdrop .form-grid { grid-template-columns: 1fr; }
+.reading-composer-backdrop .modal-header { padding: 20px; }
+.reading-composer-backdrop textarea { font-size: calc(14px + var(--font-delta)); line-height: 1.7; }
+.reading-composer-backdrop .modal-discard-shield { position: absolute; border-radius: inherit; backdrop-filter: none; }
+.reading-card-item { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--paper-50); }
+.reading-card-item.current-page { border-left: 3px solid var(--terracotta); }
+.reading-card-item .reading-reference-item { border: 0; margin: 0; width: 100%; border-radius: 0; }
+.reading-card-actions { display: flex; justify-content: flex-end; gap: 14px; padding: 5px 10px 10px; }
+.reading-card-actions button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 3px 0; background: none; color: var(--ink-700); font: inherit; font-size: calc(12px + var(--font-delta)); cursor: pointer; }
+.reading-card-actions button:hover { color: var(--terracotta-dark); }
+.reading-card-item .card-text.compact .card-text-thought p { font-size: calc(14px + var(--font-delta)); }
+.reading-card-item .card-text.compact .card-text-quote blockquote { font-size: calc(13px + var(--font-delta)); }
+.reading-inspector-section-count { white-space: nowrap; }
+.bibliographic-details, .backup-transfer-extra { margin: 16px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; }
+.bibliographic-details > summary, .backup-transfer-extra > summary { cursor: pointer; color: var(--ink-800); font-size: calc(14px + var(--font-delta)); }
+.bibliographic-details > summary small { display: block; margin: 5px 0 0 18px; color: var(--ink-600); font-size: calc(12px + var(--font-delta)); }
+.bibliographic-details[open] > summary, .backup-transfer-extra[open] > summary { margin-bottom: 18px; }
+.tag-input-editor { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; background: var(--paper-50); border: 1px solid var(--line); border-radius: 8px; }
+.tag-input-editor:focus-within { border-color: var(--terracotta); }
+.tag-input .tag-input-editor input { flex: 1 1 130px; width: 130px; min-width: 80px; border: 0; border-radius: 0; padding: 3px 0; background: transparent; box-shadow: none; outline: none; font: inherit; }
+.tag-input-chip { display: inline-flex; gap: 5px; align-items: center; border: 0; border-radius: 5px; padding: 4px 6px; background: var(--paper-200); color: var(--ink-800); font: inherit; font-size: calc(12px + var(--font-delta)); cursor: pointer; }
+.tag-input-chip:hover { background: var(--terracotta-soft); }
+.tag-suggestion-list { display: none; }
+.tag-input:focus-within .tag-suggestion-list { display: flex; }
+.synthesis-card-options { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.synthesis-card-options > summary { cursor: pointer; color: var(--ink-700); font-size: calc(12px + var(--font-delta)); }
+.synthesis-card-options[open] > summary { margin-bottom: 8px; }
+.backup-file-location > summary { cursor: pointer; color: var(--ink-700); font-size: calc(12px + var(--font-delta)); }
+.backup-file-location code { display: block; overflow-wrap: anywhere; margin-top: 5px; }
+.outline-copy-text { width: 100%; padding: 12px; resize: vertical; font: inherit; line-height: 1.7; border: 1px solid var(--line); border-radius: 8px; }
+.card-topline:empty, .tag-list:empty { display: none; }

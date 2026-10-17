@@ -7,6 +7,7 @@ import {
   ChevronsUp,
   Edit3,
   FileText,
+  MoreHorizontal,
   Search,
   Trash2
 } from 'lucide-react'
@@ -34,6 +35,7 @@ interface LibraryViewProps {
   currentReadingDocumentId: string | null
   onLocateSynthesis: (cardId: string, excluded: boolean) => void
   onOpenSource: (documentId: string, page: number | null, locatorJson: string) => void
+  onGoReading?: () => void
 }
 
 const libraryCardPreviewCount = 10
@@ -43,7 +45,8 @@ export function LibraryView({
   runMutation,
   currentReadingDocumentId,
   onLocateSynthesis,
-  onOpenSource
+  onOpenSource,
+  onGoReading
 }: LibraryViewProps): React.JSX.Element {
   const [query, setQuery] = usePersistentState(`inkstone:library-query:${snapshot.currentProjectId}`, '')
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
@@ -179,9 +182,9 @@ export function LibraryView({
     <div className="workspace-view library-view">
       <header className="view-heading">
         <div>
-          <span className="eyebrow">永久总库</span>
+          <span className="eyebrow">按来源回顾</span>
           <h1>项目卡片库</h1>
-          <p>按来源文献回顾项目中的全部摘录、评论和整理状态。</p>
+          <p>保存全部卡片；跨文献归类请前往“二次整理”。</p>
         </div>
         <div className="library-heading-actions">
           <button
@@ -235,6 +238,7 @@ export function LibraryView({
             />
             <span>{filteredCards.length}</span>
           </label>
+          {query || sourceFilter || stateFilter !== 'all' ? <button className="button ghost small" type="button" onClick={() => { setQuery(''); setSourceFilter(''); setStateFilter('all') }}>清除筛选</button> : null}
         </div>
       </header>
 
@@ -321,9 +325,9 @@ export function LibraryView({
                             >
                               {role.name}
                             </span>
-                          )) : <span className="soft-pill">未设置卡片用途</span>}
+                          )) : null}
                           {card.rawText !== card.displayText ? (
-                            <span className="soft-pill">保留原始版本</span>
+                            <span className="soft-pill">摘录已校订</span>
                           ) : null}
                         </div>
                         <CardText card={card} />
@@ -360,11 +364,12 @@ export function LibraryView({
                             <Edit3 size={14} /> 编辑
                           </button>
                           <button
-                            className="danger-text"
                             type="button"
-                            onClick={() => setDeletingCard(card)}
+                            aria-label="更多卡片操作"
+                            title="更多卡片操作"
+                            onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setCardContextMenu({ x: bounds.left, y: bounds.bottom, card }) }}
                           >
-                            <Trash2 size={14} /> 永久删除
+                            <MoreHorizontal size={14} /> 更多
                           </button>
                         </div>
                       </div>
@@ -397,19 +402,16 @@ export function LibraryView({
           <EmptyState
             icon={FileText}
             title={
-              query
-                ? '没有匹配的卡片'
-                : stateFilter !== 'all'
-                ? '当前整理状态下没有卡片'
-                : '项目中还没有卡片'
+              snapshot.cards.length === 0 ? '还没有阅读卡片' : '没有符合当前筛选的卡片'
             }
             description={
-              query
-                ? '尝试缩短关键词，或清空搜索条件。'
-                : stateFilter !== 'all'
-                ? '当前整理状态下没有卡片，可以切换到“全部”查看永久总库。'
-                : '第一阶段的新项目会保持空白；真实摘录将在 PDF 阅读功能接入后创建。'
+              snapshot.cards.length === 0
+                ? '在阅读台打开 PDF，选中文字并点击“摘录成卡片”，也可以写下自己的想法。'
+                : '卡片仍在项目中。清除搜索、来源和整理状态筛选，即可查看全部卡片。'
             }
+            action={snapshot.cards.length === 0
+              ? onGoReading ? <button className="button primary" type="button" onClick={onGoReading}>前往阅读台摘录</button> : undefined
+              : <button className="button secondary" type="button" onClick={() => { setQuery(''); setSourceFilter(''); setStateFilter('all') }}>查看全部卡片</button>}
           />
         ) : null}
       </div>

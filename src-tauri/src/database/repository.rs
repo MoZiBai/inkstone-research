@@ -23,7 +23,9 @@ use crate::models::{
     UpdateResearchRoleInput, WorkspaceSnapshot,
 };
 
-use super::schema::{migrate_database, seed_database, SCHEMA_VERSION};
+#[cfg(test)]
+use super::schema::seed_database;
+use super::schema::{migrate_database, SCHEMA_VERSION};
 
 pub struct Repository {
     connection: Connection,
@@ -33,8 +35,14 @@ impl Repository {
     pub fn open(path: &Path) -> AppResult<Self> {
         let mut connection = Connection::open(path)?;
         migrate_database(&mut connection)?;
-        seed_database(&mut connection)?;
         Ok(Self { connection })
+    }
+
+    #[cfg(test)]
+    fn open_seeded(path: &Path) -> AppResult<Self> {
+        let mut repository = Self::open(path)?;
+        seed_database(&mut repository.connection)?;
+        Ok(repository)
     }
 
     #[cfg(test)]
@@ -4358,7 +4366,7 @@ mod tests {
         let repeat_safety_path = root.join("before-repeat-import.db");
 
         let (note_id, annotation_id, source_only_project) = {
-            let mut source = Repository::open(&source_path).expect("open source repository");
+            let mut source = Repository::open_seeded(&source_path).expect("open source repository");
             source
                 .connection
                 .execute(
@@ -4410,7 +4418,7 @@ mod tests {
         };
 
         {
-            let mut target = Repository::open(&target_path).expect("open target repository");
+            let mut target = Repository::open_seeded(&target_path).expect("open target repository");
             let target_only_project = target
                 .create_project(CreateProjectInput {
                     name: "导入前独有项目".into(),
@@ -5111,6 +5119,37 @@ mod tests {
     }
 
     #[test]
+    fn new_install_starts_empty_and_reopening_preserves_user_projects() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-first-launch")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("create isolated workspace");
+        let path = root.join("library.db");
+        let project_id = {
+            let mut repository = Repository::open(&path).expect("open new library");
+            let snapshot = repository.get_workspace(None).expect("first workspace");
+            assert!(snapshot.projects.is_empty());
+            assert!(snapshot.current_project_id.is_none());
+            assert!(snapshot.documents.is_empty());
+            repository
+                .create_project(CreateProjectInput {
+                    name: "我的阅读".into(),
+                    description: String::new(),
+                    color: None,
+                })
+                .expect("create first project")
+        };
+        {
+            let repository = Repository::open(&path).expect("reopen library");
+            let snapshot = repository.get_workspace(None).expect("saved workspace");
+            assert_eq!(snapshot.projects.len(), 1);
+            assert_eq!(snapshot.projects[0].id, project_id);
+        }
+        fs::remove_dir_all(root).expect("remove isolated test workspace");
+    }
+
+    #[test]
     fn removing_all_projects_does_not_restore_examples_after_reopen() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
@@ -5120,7 +5159,7 @@ mod tests {
         let database_path = root.join("inkstone.db");
 
         {
-            let mut repository = Repository::open(&database_path).expect("open database");
+            let mut repository = Repository::open_seeded(&database_path).expect("open database");
             repository
                 .remove_project("seed-project-tombs")
                 .expect("remove first seed project");
@@ -5156,7 +5195,7 @@ mod tests {
         let manual_backup_path = root.join("manual-full.db");
 
         {
-            let mut source = Repository::open(&source_path).expect("open source repository");
+            let mut source = Repository::open_seeded(&source_path).expect("open source repository");
             source
                 .set_backup_preferences(Some(&root), Some(30), None, 120)
                 .expect("set source-only backup preferences");
@@ -5226,7 +5265,7 @@ mod tests {
         let repeat_safety_path = root.join("before-repeat-project-import.db");
 
         let (note_id, annotation_id, document_group_id) = {
-            let mut source = Repository::open(&source_path).expect("open source repository");
+            let mut source = Repository::open_seeded(&source_path).expect("open source repository");
             source
                 .connection
                 .execute(
@@ -5285,7 +5324,8 @@ mod tests {
         };
 
         {
-            let mut target = Repository::open(&target_path).expect("open project import target");
+            let mut target =
+                Repository::open_seeded(&target_path).expect("open project import target");
             target
                 .remove_project("seed-project-tombs")
                 .expect("remove project before restore test");
@@ -5386,13 +5426,13 @@ mod tests {
         let safety_path = root.join("before-merge.db");
 
         {
-            let source = Repository::open(&source_path).expect("open export source");
+            let source = Repository::open_seeded(&source_path).expect("open export source");
             source
                 .export_project_database("seed-project-tombs", &project_export_path)
                 .expect("export one project");
         }
         {
-            let mut target = Repository::open(&target_path).expect("open merge target");
+            let mut target = Repository::open_seeded(&target_path).expect("open merge target");
             target
                 .remove_project("seed-project-tombs")
                 .expect("remove project before merge");
@@ -5440,13 +5480,14 @@ mod tests {
         let safety_path = root.join("should-not-exist.db");
 
         {
-            let source = Repository::open(&source_path).expect("open complete export source");
+            let source =
+                Repository::open_seeded(&source_path).expect("open complete export source");
             source
                 .export_database(&exported_path)
                 .expect("export multi-project database");
         }
         {
-            let mut target = Repository::open(&target_path).expect("open rejection target");
+            let mut target = Repository::open_seeded(&target_path).expect("open rejection target");
             let protected_project = target
                 .create_project(CreateProjectInput {
                     name: "验证失败时保持不变".into(),

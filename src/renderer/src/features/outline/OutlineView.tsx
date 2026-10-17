@@ -4,6 +4,7 @@ import {
   BookOpenCheck,
   ChevronDown,
   ChevronRight,
+  Copy,
   Edit3,
   FilePlus2,
   GripVertical,
@@ -31,6 +32,7 @@ import { api } from '../../lib/api'
 import { CardText } from '../../components/CardText'
 import { usePersistentSet, usePersistentState } from '../../lib/preferences'
 import { flattenOutline } from '../../lib/outline'
+import { outlineToMarkdown } from '../../lib/outlineExport'
 import { buildOutlineWorkspaceIndexes, filterProjectCards } from '../../lib/workspaceCollections'
 import type { RunMutation } from '../../types'
 
@@ -64,6 +66,22 @@ export function OutlineView({
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [viewingCard, setViewingCard] = useState<ProjectCardView | null>(null)
   const [editingLink, setEditingLink] = useState<OutlineCardLink | null>(null)
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'manual'>('idle')
+  const [copyText, setCopyText] = useState('')
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (copyResetTimer.current) clearTimeout(copyResetTimer.current) }, [])
+  const copyOutline = async (): Promise<void> => {
+    const text = outlineToMarkdown(snapshot)
+    if (copyResetTimer.current) clearTimeout(copyResetTimer.current)
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyStatus('copied')
+      copyResetTimer.current = setTimeout(() => setCopyStatus('idle'), 3000)
+    } catch {
+      setCopyText(text)
+      setCopyStatus('manual')
+    }
+  }
   const [cardQuery, setCardQuery] = usePersistentState(`inkstone:outline-query:${snapshot.currentProjectId}`, '')
   const [poolCategory, setPoolCategory] = usePersistentState(`inkstone:outline-category:${snapshot.currentProjectId}`, '')
   const [poolDocument, setPoolDocument] = usePersistentState(`inkstone:outline-document:${snapshot.currentProjectId}`, '')
@@ -166,8 +184,12 @@ export function OutlineView({
         <div>
           <span className="eyebrow">用户自建结构</span>
           <h1>写作提纲</h1>
-          <p>章节结构由你创建；卡片进入章节时只建立关联，不移动原卡片。</p>
+          <p>先选章节，再从右侧加入卡片。同一张卡片可用于多个章节。</p>
         </div>
+        <div className="heading-actions">
+        <button className="button secondary" type="button" disabled={snapshot.outlineNodes.length === 0} onClick={() => void copyOutline()} title="复制全部章节、笔记、摘录与来源，使用 Markdown 格式">
+          <Copy size={15} />{copyStatus === 'copied' ? '已复制写作材料' : '复制写作材料'}
+        </button>
         <button
           className="button primary"
           type="button"
@@ -175,6 +197,7 @@ export function OutlineView({
         >
           <FilePlus2 size={15} /> 新建一级章节
         </button>
+        </div>
       </header>
 
       <div className={`outline-layout ${resizing ? 'resizing' : ''}`} ref={layoutRef} style={{ '--outline-pool-width': `${poolWidth}px` } as React.CSSProperties}>
@@ -414,6 +437,7 @@ export function OutlineView({
             <select aria-label="按整理分类筛选候选卡片" value={poolCategory} onChange={(event) => setPoolCategory(event.target.value)}><option value="">全部分类</option>{snapshot.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
             <select aria-label="按文献筛选候选卡片" value={poolDocument} onChange={(event) => setPoolDocument(event.target.value)}><option value="">全部文献</option>{snapshot.documents.map((document) => <option key={document.id} value={document.id}>{document.title}</option>)}</select>
           </div>
+          {cardQuery || poolCategory || poolDocument || hideLinkedToSelected ? <button className="button ghost compact" type="button" onClick={() => { setCardQuery(''); setPoolCategory(''); setPoolDocument(''); setHideLinkedToSelected(false) }}>清除卡片筛选</button> : null}
           {selectedNodeId ? (
             <div className="selected-chapter-note">
               <ChevronRight size={14} />
@@ -473,16 +497,24 @@ export function OutlineView({
             {activeCards.length > poolLimit ? <button className="button ghost" type="button" onClick={() => setPoolLimit((count) => count + 50)}>再显示 50 张 · 剩余 {activeCards.length - poolLimit} 张</button> : null}
             {activeCards.length === 0 ? (
               <div className="pool-card-empty">
-                {deferredCardQuery
-                  ? '没有匹配的整理中卡片。'
-                  : hideLinkedToSelected
+                {deferredCardQuery || poolCategory || poolDocument
+                  ? '没有符合当前筛选的卡片，请清除筛选或更换条件。'
+                  : hideLinkedToSelected && snapshot.cards.some((card) => card.synthesisState === 'active')
                   ? '整理中卡片都已关联到当前章节。'
-                  : '二次整理中暂无可用卡片。'}
+                  : snapshot.cards.length > 0
+                    ? '卡片目前均已从二次整理剔除。恢复需要使用的卡片后，即可加入章节。'
+                    : '还没有卡片。在阅读台摘录后，卡片会自动出现在这里，无需手动转移。'}
               </div>
             ) : null}
           </div>
         </aside>
       </div>
+
+      {copyStatus === 'manual' ? (
+        <Modal title="复制写作材料" subtitle="当前环境未能直接写入剪贴板。选中下方内容后按 Ctrl+C，即可粘贴到写作软件。" onClose={() => setCopyStatus('idle')} width="large">
+          <textarea className="outline-copy-text" readOnly rows={15} value={copyText} aria-label="Markdown 写作材料" onFocus={(event) => event.currentTarget.select()} />
+        </Modal>
+      ) : null}
 
       {viewingCard ? (
         <CardEditDialog

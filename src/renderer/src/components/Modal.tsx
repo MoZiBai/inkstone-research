@@ -10,6 +10,7 @@ interface ModalProps {
   onClose: () => void
   width?: 'small' | 'medium' | 'large'
   hasUnsavedChanges?: boolean
+  placement?: 'center' | 'reading'
 }
 
 export function Modal({
@@ -18,7 +19,8 @@ export function Modal({
   children,
   onClose,
   width = 'medium',
-  hasUnsavedChanges = false
+  hasUnsavedChanges = false,
+  placement = 'center'
 }: ModalProps): React.JSX.Element {
   const dialogRef = useRef<HTMLElement>(null)
   const closeRef = useRef(onClose)
@@ -91,7 +93,7 @@ export function Modal({
   }, [requestClose])
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={requestClose}>
+    <div className={`modal-backdrop${placement === 'reading' ? ' reading-composer-backdrop' : ''}`} role="presentation" onMouseDown={requestClose}>
       <section
         ref={dialogRef}
         className={`modal-card modal-${width}`}

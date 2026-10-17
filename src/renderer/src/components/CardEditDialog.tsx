@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ProjectCardView, ResearchRole, UpdateCardInput } from '@shared/types'
 import { Modal } from './Modal'
 import { TagInput } from './TagInput'
-import { parseTags } from '../lib/tags'
+import { joinTagDraft, parseTags } from '../lib/tags'
 
 interface CardEditDialogProps {
   card: ProjectCardView
@@ -12,6 +12,7 @@ interface CardEditDialogProps {
   onSave: (input: UpdateCardInput) => Promise<void>
   onClose: () => void
   onOpenSource?: () => void
+  placement?: 'center' | 'reading'
 }
 
 const originLabels: Record<ProjectCardView['originKind'], string> = {
@@ -27,7 +28,8 @@ export function CardEditDialog({
   outlineUsages = [],
   onSave,
   onClose,
-  onOpenSource
+  onOpenSource,
+  placement = 'center'
 }: CardEditDialogProps): React.JSX.Element {
   const [displayText, setDisplayText] = useState(card.displayText)
   const [printPageOverride, setPrintPageOverride] = useState(card.printPageOverride ?? '')
@@ -35,14 +37,14 @@ export function CardEditDialog({
   const [selectedRoleIds, setSelectedRoleIds] = useState<Set<string>>(
     () => new Set(card.researchRoles.map((role) => role.id))
   )
-  const [tags, setTags] = useState(card.tags.join('、'))
+  const [tags, setTags] = useState(joinTagDraft(card.tags))
 
   useEffect(() => {
     setDisplayText(card.displayText)
     setPrintPageOverride(card.printPageOverride ?? '')
     setComment(card.comment)
     setSelectedRoleIds(new Set(card.researchRoles.map((role) => role.id)))
-    setTags(card.tags.join('、'))
+    setTags(joinTagDraft(card.tags))
   }, [card])
 
   const visibleRoles = useMemo(
@@ -53,7 +55,7 @@ export function CardEditDialog({
     displayText !== card.displayText ||
     printPageOverride !== (card.printPageOverride ?? '') ||
     comment !== card.comment ||
-    tags !== card.tags.join('、') ||
+    parseTags(tags).join('、') !== card.tags.join('、') ||
     Array.from(selectedRoleIds).sort().join('\u0000') !==
       card.researchRoles.map((role) => role.id).sort().join('\u0000')
 
@@ -84,6 +86,7 @@ export function CardEditDialog({
       subtitle={`${card.documentAuthors || '未知作者'} · ${card.documentTitle}`}
       onClose={onClose}
       width="large"
+      placement={placement}
       hasUnsavedChanges={hasUnsavedChanges}
     >
       <form onSubmit={submit}>
@@ -110,13 +113,16 @@ export function CardEditDialog({
             onChange={(event) => setDisplayText(event.target.value)}
           />
         </label>
-        <div className="form-grid two-columns">
+        <div>
           <label className="field">
-            <span>标签（使用顿号或逗号分隔）</span>
+            <span>标签（可选）</span>
             <TagInput value={tags} onChange={setTags} suggestions={availableTags} />
           </label>
+        </div>
+        <details className="card-source-details">
+          <summary>卡片用途与印刷页码（可选）</summary>
           <label className="field">
-            <span>单卡印刷页覆盖 <small>留空则使用文献映射</small></span>
+            <span>这张卡片的印刷页码 <small>留空则自动计算</small></span>
             <input
               value={printPageOverride}
               onChange={(event) => setPrintPageOverride(event.target.value)}
@@ -130,7 +136,6 @@ export function CardEditDialog({
                   : '当前文献尚未设置印刷页映射。'}
             </small>
           </label>
-        </div>
         <fieldset className="research-role-picker">
           <legend>卡片用途（可多选）</legend>
           {visibleRoles.length > 0 ? (
@@ -152,6 +157,7 @@ export function CardEditDialog({
             <p className="field-hint">尚未建立可用的卡片用途；可以稍后在二次整理中设置。</p>
           )}
         </fieldset>
+        </details>
         <details className="card-source-details">
           <summary>原始文字、上下文与来源信息</summary>
           <div className="original-selection-details">

@@ -1,7 +1,9 @@
 import type {
   DocumentSummary,
+  PdfAnnotation,
   ProjectCardView,
   ProjectSummary,
+  ReadingNote,
   WorkspaceSnapshot
 } from '@shared/types'
 
@@ -13,8 +15,12 @@ export type DocumentFilter = 'all' | 'available' | 'unlinked' | 'missing'
 export interface ProjectSearchResults {
   documents: DocumentSummary[]
   cards: ProjectCardView[]
+  notes: ReadingNote[]
+  annotations: PdfAnnotation[]
   documentTotal: number
   cardTotal: number
+  noteTotal: number
+  annotationTotal: number
 }
 
 const chineseCollator = new Intl.Collator('zh-CN', {
@@ -69,7 +75,7 @@ export function searchCurrentProject(
   limitPerGroup = 8
 ): ProjectSearchResults {
   const normalizedQuery = normalizeQuery(query)
-  if (!normalizedQuery) return { documents: [], cards: [], documentTotal: 0, cardTotal: 0 }
+  if (!normalizedQuery) return { documents: [], cards: [], notes: [], annotations: [], documentTotal: 0, cardTotal: 0, noteTotal: 0, annotationTotal: 0 }
 
   const documents = snapshot.documents
       .filter((document) => searchable([
@@ -89,11 +95,21 @@ export function searchCurrentProject(
         ...card.tags
       ]).includes(normalizedQuery))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+  const notes = snapshot.readingNotes
+    .filter((note) => searchable([note.content, note.selectedText]).includes(normalizedQuery))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+  const annotations = snapshot.pdfAnnotations
+    .filter((annotation) => searchable([annotation.comment, annotation.selectedText]).includes(normalizedQuery))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
   return {
     documents: documents.slice(0, limitPerGroup),
     cards: cards.slice(0, limitPerGroup),
+    notes: notes.slice(0, limitPerGroup),
+    annotations: annotations.slice(0, limitPerGroup),
     documentTotal: documents.length,
-    cardTotal: cards.length
+    cardTotal: cards.length,
+    noteTotal: notes.length,
+    annotationTotal: annotations.length
   }
 }
 

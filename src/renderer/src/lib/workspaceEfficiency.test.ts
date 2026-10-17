@@ -42,6 +42,24 @@ it('searches current project documents and card excerpts, notes and tags', () =>
   expect(searchCurrentProject(snapshot, '礼制').cards.map((item) => item.id)).toEqual(['c1'])
 })
 
+it('finds document-level thoughts and annotation comments with separate result counts', () => {
+  const snapshot: WorkspaceSnapshot = {
+    projects, currentProjectId: 'p1', documents, documentGroups: [], cards: [card], categories: [], researchRoles: [], outlineNodes: [], outlineLinks: [],
+    readingNotes: Array.from({ length: 12 }, (_, index) => ({ id: `note-${index}`, projectId: 'p1', documentId: 'd1', kind: 'critique', content: '需要核验这个观点', selectedText: '', pageNumber: null, locatorJson: '{}', createdAt: '', updatedAt: String(index).padStart(2, '0') })),
+    pdfAnnotations: [{ id: 'annotation', projectId: 'p1', documentId: 'd1', kind: 'highlight', pageNumber: 3, color: '#ffee00', selectedText: '原文术语', comment: '需要核验译文', locatorJson: '{}', createdAt: '', updatedAt: '' }]
+  }
+  const results = searchCurrentProject(snapshot, ' 核验 ')
+  expect(results.notes).toHaveLength(8)
+  expect(results.noteTotal).toBe(12)
+  expect(results.notes[0]?.id).toBe('note-11')
+  expect(results.notes[0]?.pageNumber).toBeNull()
+  expect(results.annotations.map((item) => item.id)).toEqual(['annotation'])
+  expect(results.annotationTotal).toBe(1)
+  expect(searchCurrentProject(snapshot, '原文术语').annotations).toHaveLength(1)
+  expect(searchCurrentProject(snapshot, '核验', 20).notes).toHaveLength(12)
+  expect(searchCurrentProject(snapshot, '  ')).toEqual({ documents: [], cards: [], notes: [], annotations: [], documentTotal: 0, cardTotal: 0, noteTotal: 0, annotationTotal: 0 })
+})
+
 describe('PDF filenames', () => {
   it('reports all matching results even when only a first page is rendered', () => {
     const snapshot = { projects, currentProjectId: 'p1', documents, documentGroups: [], cards: Array.from({ length: 25 }, (_, index) => ({ ...card, id: `c${index}` })), categories: [], researchRoles: [], pdfAnnotations: [], readingNotes: [], outlineNodes: [], outlineLinks: [] } satisfies WorkspaceSnapshot

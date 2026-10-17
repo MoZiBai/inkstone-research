@@ -34,6 +34,7 @@ import type {
   PdfAnnotation,
   PdfAnnotationKind,
   PdfLocator,
+  ProjectCardView,
   ReadingNote,
   ReadingNoteKind,
   WorkspaceSnapshot
@@ -46,7 +47,8 @@ import { usePersistentState, usePersistentSet } from '../../lib/preferences'
 import { readReadingProgress } from './readingProgress'
 import { TagInput } from '../../components/TagInput'
 import { parseTags } from '../../lib/tags'
-import { CardText } from '../../components/CardText'
+import { CardEditDialog } from '../../components/CardEditDialog'
+import { ReadingCardItem } from './ReadingCardItem'
 import {
   filterAndSortDocuments,
   titleFromPdfPath,
@@ -89,6 +91,8 @@ export interface ReadingFocusRequest {
   documentId: string
   page: number | null
   locator: PdfLocator | null
+  noteId?: string
+  annotationId?: string
 }
 
 interface ReadingViewProps {
@@ -172,6 +176,7 @@ export function ReadingView({
   } | null>(null)
   const [deletingNote, setDeletingNote] = useState<ReadingNote | null>(null)
   const [editingNote, setEditingNote] = useState<ReadingNote | null>(null)
+  const [editingCard, setEditingCard] = useState<ProjectCardView | null>(null)
   const [focusRequest, setFocusRequest] = useState<ReadingFocusRequest | null>(initialRequest ?? null)
   const [deletingAnnotation, setDeletingAnnotation] = useState<PdfAnnotation | null>(null)
   const [editingAnnotation, setEditingAnnotation] = useState<PdfAnnotation | null>(null)
@@ -207,6 +212,7 @@ export function ReadingView({
   const [assigningDocument, setAssigningDocument] = useState<DocumentSummary | null>(null)
   const deferredDocumentQuery = useDeferredValue(documentQuery)
   const focusCounter = useRef(0)
+  const appliedRequest = useRef<number | null>(null)
   const readingLayoutRef = useRef<HTMLDivElement>(null)
 
   const selectedDocument = useMemo(
@@ -275,12 +281,24 @@ export function ReadingView({
   )
 
   useEffect(() => {
-    if (initialRequest) {
+    if (initialRequest && appliedRequest.current !== initialRequest.token) {
+      appliedRequest.current = initialRequest.token
       setSelectedDocumentId(initialRequest.documentId)
       setFocusRequest(initialRequest)
+      if (initialRequest.noteId || initialRequest.annotationId) {
+        setInspectorCollapsed(false)
+        if (initialRequest.noteId) {
+          setEditingNote(snapshot.readingNotes.find((note) => note.id === initialRequest.noteId) ?? null)
+          setCollapsedInspectorSections((sections) => new Set([...sections].filter((section) => section !== 'notes')))
+        }
+        if (initialRequest.annotationId) {
+          setEditingAnnotation(snapshot.pdfAnnotations.find((annotation) => annotation.id === initialRequest.annotationId) ?? null)
+          setCollapsedInspectorSections((sections) => new Set([...sections].filter((section) => section !== 'annotations')))
+        }
+      }
     }
     return undefined
-  }, [initialRequest, onFocusHandled])
+  }, [initialRequest, snapshot.readingNotes, snapshot.pdfAnnotations, setCollapsedInspectorSections, setInspectorCollapsed, setSelectedDocumentId])
 
   const completeFocusRequest = useCallback((): void => {
     setFocusRequest(null)
@@ -1244,7 +1262,7 @@ export function ReadingView({
                       ))}
                     </div>
                   ) : (
-                    <p className="reading-inspector-empty">当前范围没有灵感或质疑，可切换“整篇文献”查看。</p>
+                    <p className="reading-inspector-empty">{documentNotes.length === 0 ? '读到一个想法或疑问，就在这里随手记下。' : '本页没有阅读思考，可切换“整篇文献”查看。'}</p>
                   )}
                 </div>
               ) : null}
@@ -1253,7 +1271,7 @@ export function ReadingView({
             <section className={`reading-inspector-section ${collapsedInspectorSections.has('cards') ? 'collapsed' : ''}`}>
               <ReadingInspectorSectionToggle
                 title="本篇卡片"
-                count={documentCards.length}
+                count={inspectorScope === 'page' ? `本页 ${cardPagePartition.currentPageItems.length} / 全篇 ${documentCards.length}` : documentCards.length}
                 collapsed={collapsedInspectorSections.has('cards')}
                 onToggle={() => toggleInspectorSection('cards')}
               />
@@ -1265,39 +1283,28 @@ export function ReadingView({
                         <div className="reading-page-group-label current">当前第 {currentPdfPage} 页</div>
                       ) : null}
                       {cardPagePartition.currentPageItems.slice(0, inspectorLimit).map((card) => (
-                        <button
-                          type="button"
-                          className="reading-reference-item current-page"
+                        <ReadingCardItem
+                          card={card}
+                          currentPage
                           key={card.id}
-                          onClick={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
-                        >
-                          <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
-                          <span>
-                            <CardText card={card} compact />
-                            <small>当前页 · 点击回到原文位置</small>
-                          </span>
-                        </button>
+                          onLocate={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
+                          onEdit={() => setEditingCard(card)}
+                        />
                       ))}
                       {inspectorScope === 'all' && cardPagePartition.otherPageItems.length > 0 ? (
                         <div className="reading-page-group-label">其他页</div>
                       ) : null}
                       {(inspectorScope === 'all' ? cardPagePartition.otherPageItems.slice(0, Math.max(0, inspectorLimit - cardPagePartition.currentPageItems.length)) : []).map((card) => (
-                        <button
-                          type="button"
-                          className="reading-reference-item"
+                        <ReadingCardItem
+                          card={card}
                           key={card.id}
-                          onClick={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
-                        >
-                          <span className="reading-reference-page">{card.pdfPage ?? '—'}</span>
-                          <span>
-                            <CardText card={card} compact />
-                            <small>点击回到原文位置</small>
-                          </span>
-                        </button>
+                          onLocate={() => focusDocumentLocation(card.documentId, card.pdfPage, card.locatorJson)}
+                          onEdit={() => setEditingCard(card)}
+                        />
                       ))}
                     </div>
                   ) : (
-                    <p className="reading-inspector-empty">当前范围没有卡片，可切换“整篇文献”查看。</p>
+                    <p className="reading-inspector-empty">{documentCards.length === 0 ? '选中文字，点击“摘录成卡片”。保存后会自动进入卡片库和二次整理。' : '本页没有卡片，可切换“整篇文献”查看。'}</p>
                   )}
                 </div>
               ) : null}
@@ -1306,7 +1313,7 @@ export function ReadingView({
             <section className={`reading-inspector-section ${collapsedInspectorSections.has('annotations') ? 'collapsed' : ''}`}>
               <ReadingInspectorSectionToggle
                 title="本篇批注"
-                count={documentAnnotations.length}
+                count={inspectorScope === 'page' ? `本页 ${annotationPagePartition.currentPageItems.length} / 全篇 ${documentAnnotations.length}` : documentAnnotations.length}
                 collapsed={collapsedInspectorSections.has('annotations')}
                 onToggle={() => toggleInspectorSection('annotations')}
               />
@@ -1341,7 +1348,7 @@ export function ReadingView({
                       ))}
                     </div>
                   ) : (
-                    <p className="reading-inspector-empty">当前范围没有批注，可切换“整篇文献”查看。</p>
+                    <p className="reading-inspector-empty">{documentAnnotations.length === 0 ? '选中文字即可高亮或添加下划线。' : '本页没有批注，可切换“整篇文献”查看。'}</p>
                   )}
                 </div>
               ) : null}
@@ -1528,6 +1535,19 @@ export function ReadingView({
             </div>
           </form>
         </Modal>
+      ) : null}
+
+      {editingCard ? (
+        <CardEditDialog
+          card={editingCard}
+          placement="reading"
+          researchRoles={snapshot.researchRoles}
+          availableTags={[...new Set(snapshot.cards.flatMap((card) => card.tags))]}
+          outlineUsages={snapshot.outlineLinks.filter((link) => link.projectCardId === editingCard.id).map((link) => ({ linkId: link.id, nodeTitle: snapshot.outlineNodes.find((node) => node.id === link.outlineNodeId)?.title ?? '未命名章节', note: link.note }))}
+          onSave={async (input) => { if (await runMutation(() => api.updateCard(input), '卡片已保存。')) setEditingCard(null) }}
+          onClose={() => setEditingCard(null)}
+          onOpenSource={() => { focusDocumentLocation(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson); setEditingCard(null) }}
+        />
       ) : null}
 
       {pendingCard ? (
@@ -1775,7 +1795,7 @@ function DocumentGroupAssignmentDialog({
 interface ReadingInspectorSectionToggleProps {
   title: string
   eyebrow?: string
-  count?: number
+  count?: number | string
   collapsed: boolean
   onToggle: () => void
 }
@@ -2026,6 +2046,7 @@ function ImportPdfDialog({
             value={metadata}
             onChange={onMetadataChange}
             autoFocusTitle={sourcePaths.length === 0}
+            compact
           />
         ) : (
           <div className="batch-pdf-import-list">
@@ -2042,7 +2063,7 @@ function ImportPdfDialog({
           </div>
         )}
         <p className="import-note">
-          同一个 PDF 在多个项目中导入时会复用文件实体；每个项目仍然拥有独立的评论、标签和论证用途。
+          只需选择文件即可开始阅读，书目信息可以稍后补充。同一 PDF 不会重复占用存储空间。
         </p>
         <div className="modal-actions">
           <button className="button ghost" type="button" disabled={busy} data-modal-close>
@@ -2068,12 +2089,14 @@ interface BibliographicFieldsProps {
   value: MetadataDraft
   onChange: (value: MetadataDraft) => void
   autoFocusTitle?: boolean
+  compact?: boolean
 }
 
-function BibliographicFields({
+export function BibliographicFields({
   value,
   onChange,
-  autoFocusTitle = false
+  autoFocusTitle = false,
+  compact = false
 }: BibliographicFieldsProps): React.JSX.Element {
   const parsed = useMemo(() => parseBibliography(value.metadataRaw), [value.metadataRaw])
   const update = (key: keyof MetadataDraft, next: string): void => {
@@ -2102,6 +2125,8 @@ function BibliographicFields({
           placeholder="输入文献、书籍或资料标题"
         />
       </label>
+      <details className="bibliographic-details" open={!compact}>
+        <summary>补充文献信息（可选）<small>作者、年份，或粘贴引用自动填写</small></summary>
       <div className="form-grid two-columns">
         <label className="field">
           <span>作者</span>
@@ -2171,6 +2196,7 @@ function BibliographicFields({
           <p className="bibliography-no-match">暂未识别出可靠字段，可继续手动填写；原始粘贴内容仍会保存。</p>
         ) : null}
       </section>
+      </details>
     </>
   )
 }
@@ -2243,9 +2269,10 @@ function ReadingNoteDialog({
   return (
     <Modal
       title={editing ? `编辑${isInsight ? '灵感' : '质疑'}笔记` : isInsight ? '记录阅读灵感' : '记录对作者观点的质疑'}
-      subtitle={selection ? `关联 PDF 第 ${selection.pageNumber} 页的原文位置保持不变` : '当前文献的独立阅读笔记'}
+      subtitle={selection ? `PDF 第 ${selection.pageNumber} 页 · 保存后可转为卡片，纳入整理` : '记录对整篇文献的想法；目前保留在阅读思考中'}
       onClose={onClose}
       width="large"
+      placement="reading"
       hasUnsavedChanges={content !== initialContent}
     >
       <form
@@ -2434,9 +2461,10 @@ function CreateCardDialog({
   return (
     <Modal
       title="创建阅读卡片"
-      subtitle={`PDF 第 ${selection.pageNumber} 页 · 原文和定位信息会永久保留`}
+      subtitle={`PDF 第 ${selection.pageNumber} 页 · 保存后进入卡片库与二次整理`}
       onClose={onClose}
       width="large"
+      placement="reading"
       hasUnsavedChanges={
         displayText !== selection.text ||
         comment !== initialComment ||

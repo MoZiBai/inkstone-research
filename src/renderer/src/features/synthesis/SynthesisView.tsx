@@ -244,7 +244,7 @@ export function SynthesisView({
         <div>
           <span className="eyebrow">跨文献整理</span>
           <h1>二次整理</h1>
-          <p>项目全部卡片进入此处；剔除只退出整理工作区，不删除卡片。</p>
+          <p>按主题归类不同文献的卡片；剔除的卡片仍保留在卡片库，也可随时恢复。</p>
         </div>
         <div className="heading-actions">
           <button className="button secondary" type="button" disabled={currentVisibleCards.length === 0} onClick={toggleVisibleSelection}>
@@ -432,12 +432,14 @@ export function SynthesisView({
                               >
                                 {role.name}
                               </span>
-                            )) : <span className="soft-pill">未设置作用</span>}
+                            )) : null}
                           </div>
                           <button type="button" onClick={() => setEditingCard(card)}>
                             <Edit3 size={13} /> 编辑
                           </button>
                         </div>
+                        <details className="synthesis-card-options">
+                          <summary>移动 / 剔除</summary>
                         <label className="category-move-control">
                           <span>移动到分类</span>
                           <select
@@ -465,6 +467,7 @@ export function SynthesisView({
                         >
                           <ArchiveX size={13} /> 剔除（卡片保留）
                         </button>
+                        </details>
                       </article>
                     ))}
                     {hiddenCardCount > 0 && categoryExpanded ? <button className="category-card-overflow" type="button" onClick={() => setCardLimits((limits) => ({ ...limits, [category.id]: (limits[category.id] ?? 50) + 50 }))}>再显示 {Math.min(50, hiddenCardCount)} 张 · 剩余 {hiddenCardCount} 张</button> : null}

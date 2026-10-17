@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::error::{AppError, AppResult};
-use rusqlite::{Connection, Result};
+use rusqlite::Connection;
 
 pub const SCHEMA_VERSION: i64 = 12;
 
@@ -425,7 +425,8 @@ pub fn migrate_database(connection: &mut Connection) -> AppResult<()> {
     Ok(())
 }
 
-pub fn seed_database(connection: &mut Connection) -> Result<()> {
+#[cfg(test)]
+pub fn seed_database(connection: &mut Connection) -> rusqlite::Result<()> {
     let initialized: i64 = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM app_metadata WHERE key = 'database_initialized')",
         [],

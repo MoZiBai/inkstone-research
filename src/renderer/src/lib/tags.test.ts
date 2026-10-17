@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { completeTag, parseTags, suggestTags } from './tags'
+import { completeTag, joinTagDraft, parseTags, splitTagDraft, suggestTags } from './tags'
 
 describe('shared tag editing', () => {
+  it('keeps committed chips separate from the unfinished input without losing it on save', () => {
+    expect(splitTagDraft(joinTagDraft(['甲', '乙']))).toEqual({ committed: ['甲', '乙'], draft: '' })
+    const value = joinTagDraft(['甲'], '未按回车的标签')
+    expect(splitTagDraft(value)).toEqual({ committed: ['甲'], draft: '未按回车的标签' })
+    expect(parseTags(value)).toEqual(['甲', '未按回车的标签'])
+    expect(splitTagDraft('甲，乙、正在输入')).toEqual({ committed: ['甲', '乙'], draft: '正在输入' })
+    expect(joinTagDraft([], '')).toBe('')
+  })
   it('accepts common Chinese and English separators and deduplicates', () => {
     expect(parseTags(' 主题A、主题B，主题A; Topic C；主题D\n主题E, ')).toEqual(['主题A', '主题B', 'Topic C', '主题D', '主题E'])
   })

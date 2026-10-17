@@ -1,4 +1,13 @@
 const separators = /[\n,，、;；]+/
+export function splitTagDraft(value: string): { committed: string[]; draft: string } {
+  const tokens = value.split(separators)
+  const draft = tokens.pop() ?? ''
+  return { committed: parseTags(tokens.join('、')), draft }
+}
+
+export function joinTagDraft(committed: string[], draft = ''): string {
+  return committed.length ? `${committed.join('、')}、${draft}` : draft
+}
 export function parseTags(value: string): string[] {
   return [...new Set(value.split(separators).map((tag) => tag.trim()).filter(Boolean))]
 }

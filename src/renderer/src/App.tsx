@@ -10,6 +10,8 @@ import {
   FileStack,
   FolderKanban,
   Library,
+  Lightbulb,
+  Highlighter,
   LoaderCircle,
   CircleX,
   ClipboardPaste,
@@ -250,7 +252,7 @@ export default function App(): React.JSX.Element {
   const projectSearchResults = useMemo(
     () => snapshot
       ? searchCurrentProject(snapshot, deferredProjectSearchQuery, projectSearchLimit)
-      : { documents: [], cards: [], documentTotal: 0, cardTotal: 0 },
+      : { documents: [], cards: [], notes: [], annotations: [], documentTotal: 0, cardTotal: 0, noteTotal: 0, annotationTotal: 0 },
     [deferredProjectSearchQuery, snapshot, projectSearchLimit]
   )
   const projectSearchOpen = projectSearchFocused && Boolean(projectSearchQuery.trim())
@@ -714,7 +716,7 @@ export default function App(): React.JSX.Element {
                           <Download size={15} />
                           <span>
                             <strong>导出此项目</strong>
-                            <small>备份当前项目的全部记录</small>
+                            <small>备份当前项目记录，不含 PDF 文件</small>
                           </span>
                         </button>
                         <button
@@ -756,7 +758,7 @@ export default function App(): React.JSX.Element {
                     value={projectSearchQuery}
                     onChange={(event) => setProjectSearchQuery(event.target.value)}
                     placeholder="搜索当前项目"
-                    aria-label="搜索当前项目的文献和卡片"
+                    aria-label="搜索当前项目的文献、卡片、阅读思考和批注"
                   />
                 </label>
                 {projectSearchOpen ? (
@@ -798,9 +800,39 @@ export default function App(): React.JSX.Element {
                         ))}
                       </section>
                     ) : null}
-                    {projectSearchResults.documentTotal > projectSearchResults.documents.length || projectSearchResults.cardTotal > projectSearchResults.cards.length ? <button type="button" onClick={() => setProjectSearchLimit((limit) => limit + 20)}>显示更多结果</button> : null}
-                    {projectSearchResults.documents.length === 0 && projectSearchResults.cards.length === 0 ? (
-                      <p>没有匹配的文献、摘录、即时笔记或标签。</p>
+                    {projectSearchResults.notes.length > 0 ? (
+                      <section>
+                        <header>阅读思考 <span>{projectSearchResults.noteTotal}</span></header>
+                        {projectSearchResults.notes.map((note) => (
+                          <button type="button" key={note.id} onClick={() => {
+                            setReadingRequest({ token: Date.now(), documentId: note.documentId, page: note.pageNumber, locator: parsePdfLocator(note.locatorJson), noteId: note.id })
+                            setActiveView('reading')
+                            setProjectSearchFocused(false)
+                          }}>
+                            <Lightbulb size={14} />
+                            <span><strong>{note.content}</strong><small>{note.kind === 'insight' ? '灵感' : '质疑'} · {snapshot.documents.find((document) => document.id === note.documentId)?.title}{note.pageNumber ? ` · PDF ${note.pageNumber} 页` : ' · 整篇思考'}</small></span>
+                          </button>
+                        ))}
+                      </section>
+                    ) : null}
+                    {projectSearchResults.annotations.length > 0 ? (
+                      <section>
+                        <header>PDF 批注 <span>{projectSearchResults.annotationTotal}</span></header>
+                        {projectSearchResults.annotations.map((annotation) => (
+                          <button type="button" key={annotation.id} onClick={() => {
+                            setReadingRequest({ token: Date.now(), documentId: annotation.documentId, page: annotation.pageNumber, locator: parsePdfLocator(annotation.locatorJson), annotationId: annotation.id })
+                            setActiveView('reading')
+                            setProjectSearchFocused(false)
+                          }}>
+                            <Highlighter size={14} />
+                            <span><strong>{annotation.comment || annotation.selectedText}</strong><small>{annotation.kind === 'highlight' ? '高亮' : '下划线'} · {snapshot.documents.find((document) => document.id === annotation.documentId)?.title} · PDF {annotation.pageNumber} 页</small></span>
+                          </button>
+                        ))}
+                      </section>
+                    ) : null}
+                    {projectSearchResults.documentTotal > projectSearchResults.documents.length || projectSearchResults.cardTotal > projectSearchResults.cards.length || projectSearchResults.noteTotal > projectSearchResults.notes.length || projectSearchResults.annotationTotal > projectSearchResults.annotations.length ? <button type="button" onClick={() => setProjectSearchLimit((limit) => limit + 20)}>显示更多结果</button> : null}
+                    {projectSearchResults.documentTotal + projectSearchResults.cardTotal + projectSearchResults.noteTotal + projectSearchResults.annotationTotal === 0 ? (
+                      <p>没有匹配的文献、卡片、阅读思考或批注。</p>
                     ) : null}
                   </div>
                 ) : null}
@@ -828,7 +860,7 @@ export default function App(): React.JSX.Element {
                 void loadBackupManager()
               }}
             >
-              <DatabaseBackup size={14} /> 备份与恢复
+              <DatabaseBackup size={14} /> 备份与导入
             </button>
             <span className="local-badge">
               <Sparkles size={14} /> 本地优先
@@ -902,6 +934,7 @@ export default function App(): React.JSX.Element {
                   currentReadingDocumentId={readingDocumentId}
                   onLocateSynthesis={locateSynthesis}
                   onOpenSource={openSource}
+                  onGoReading={() => setActiveView('reading')}
                 />
               </div>
               <div className={`view-pane ${activeView === 'synthesis' ? 'active' : ''}`} aria-hidden={activeView !== 'synthesis'}>
@@ -1122,7 +1155,7 @@ function DatabaseImportResultDialog({
   onClose: () => void
 }): React.JSX.Element {
   return (
-    <Modal title="数据库合并完成" onClose={onClose} width="large">
+    <Modal title="备份导入完成" onClose={onClose} width="large">
       <div className="database-import-result">
         <ShieldCheck size={28} />
         <p>现有项目保持不变；文件中的项目、卡片、标注、二次整理和提纲已安全合并。</p>
@@ -1189,7 +1222,7 @@ function DatabaseImportPreviewDialog({
   const projectOnly = pending.mode === 'project'
   return (
     <Modal
-      title={projectOnly ? '导入项目预览' : '数据库合并预览'}
+      title={projectOnly ? '导入项目预览' : '导入备份预览'}
       subtitle={`已检查“${fileName(pending.path)}”；确认前请核对来源内容和预计合并结果。`}
       onClose={() => {
         if (!busy) onClose()
@@ -1221,7 +1254,7 @@ function DatabaseImportPreviewDialog({
       <div className="database-preview-explanation">
         <ShieldCheck size={17} />
         <p>
-          “新增”是会补入的数据库记录；“跳过”是稳定标识与内容都相同的重复记录；“冲突”表示稳定标识相同但内容不同，本次会保留当前资料库中的版本。导入前必须先成功创建自动安全备份，现有项目不会被清空或替换。
+          缺少的记录会补入，相同记录不会重复添加；同一条记录内容不同时，保留当前版本。因此，导入不会撤回已经修改的笔记。导入前会自动备份，现有项目不会被清空。
         </p>
       </div>
       {preview.missingPdfCount > 0 ? (
@@ -1230,7 +1263,7 @@ function DatabaseImportPreviewDialog({
       <div className="modal-actions">
         <button className="button ghost" type="button" disabled={busy} onClick={onClose}>取消</button>
         <button className="button primary" type="button" disabled={busy} onClick={onConfirm}>
-          {busy ? '正在安全合并…' : projectOnly ? '确认导入项目' : '确认合并数据库'}
+          {busy ? '正在导入…' : projectOnly ? '导入项目' : '导入备份'}
         </button>
       </div>
     </Modal>
@@ -1279,7 +1312,7 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
             maxLength={160}
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="例如：墓葬空间与社会结构"
+            placeholder="例如：阅读笔记、城市观察、一本书的想法"
           />
         </label>
         <label className="field">

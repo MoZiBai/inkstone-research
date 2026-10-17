@@ -63,42 +63,32 @@ export function DatabaseTransferDialog({
   return (
     <Modal
       title="备份与导入"
-      subtitle="所有导入都采用非破坏性合并；现有项目不会因导入文件内容不完整而消失。"
+      subtitle="备份保存阅读记录，不包含 PDF 文件。导入可补回缺失内容，但不会把现有修改回退到旧版本。"
       onClose={onClose}
       width="large"
     >
-      <div className="database-transfer-options">
-        <button type="button" disabled={allBusy} onClick={onExport}>
-          <span className="database-transfer-icon"><Download size={20} /></span>
-          <span>
-            <strong>导出完整数据库</strong>
-            <small>保存项目、卡片、标注、阅读笔记、二次整理和写作提纲。</small>
-          </span>
-        </button>
-        <button type="button" disabled={allBusy} onClick={onImportProject}>
-          <span className="database-transfer-icon"><Upload size={20} /></span>
-          <span>
-            <strong>导入单个项目</strong>
-            <small>导入项目级数据库，保留当前资料库中的所有已有项目。</small>
-          </span>
-        </button>
-        <button className="database-merge-option" type="button" disabled={allBusy} onClick={onMerge}>
-          <span className="database-transfer-icon"><DatabaseBackup size={20} /></span>
-          <span>
-            <strong>合并完整数据库备份</strong>
-            <small>把备份中的项目和研究数据补充进来，不删除或覆盖当前内容。</small>
-          </span>
-        </button>
-      </div>
-      <div className="database-transfer-note">
-        <ShieldCheck size={16} />
-        <span>数据库备份保存卡片、批注、分类、提纲、文献元数据和 PDF 路径，但不会复制 PDF 原件。</span>
-      </div>
-
+      <details className="backup-transfer-extra">
+        <summary>导出到其他位置 / 导入已有备份</summary>
+        <div className="database-transfer-options">
+          <button type="button" disabled={allBusy} onClick={onExport}>
+            <span className="database-transfer-icon"><Download size={20} /></span>
+            <span><strong>导出全部记录</strong><small>自行选择保存位置；不受自动清理规则影响，不含 PDF 文件。</small></span>
+          </button>
+          <button type="button" disabled={allBusy} onClick={onImportProject}>
+            <span className="database-transfer-icon"><Upload size={20} /></span>
+            <span><strong>导入单个项目</strong><small>添加项目备份中的记录，不移除现有项目。</small></span>
+          </button>
+          <button className="database-merge-option" type="button" disabled={allBusy} onClick={onMerge}>
+            <span className="database-transfer-icon"><DatabaseBackup size={20} /></span>
+            <span><strong>导入完整备份</strong><small>补入缺少的记录；相同记录不重复，内容不同则保留当前版本。</small></span>
+          </button>
+        </div>
+        <div className="database-transfer-note"><ShieldCheck size={16} /><span>换电脑时请另外保存 PDF 文件；导入记录后可重新链接 PDF。</span></div>
+      </details>
       <section className="backup-manager-section">
         <header className="backup-manager-heading">
           <div>
-            <h3>自动安全备份</h3>
+            <h3>备份全部记录</h3>
             <p>周期从每次启动软件后开始计算；隐藏到后台仍继续，完全退出后停止。</p>
           </div>
           <button className="icon-button" type="button" disabled={managerBusy} onClick={onRefresh} aria-label="刷新备份列表">
@@ -190,7 +180,7 @@ export function DatabaseTransferDialog({
                   disabled={allBusy || retentionValue === 'never'}
                   onClick={onCleanup}
                 >
-                  按策略清理
+                  清理旧备份
                 </button>
               </div>
 
@@ -213,7 +203,7 @@ export function DatabaseTransferDialog({
 
             <div className="backup-records-heading">
               <div>
-                <h4>砚台识别的备份</h4>
+                <h4>备份记录</h4>
                 <span>{manager.records.filter((record) => record.isAvailable).length} 份文件存在 · {manager.records.filter((record) => !record.isAvailable).length} 份文件缺失 · 共 {formatBytes(manager.totalSizeBytes)}</span>
               </div>
             </div>
@@ -226,7 +216,7 @@ export function DatabaseTransferDialog({
                   <div className="backup-record-copy">
                     <strong title={record.path}>{fileName(record.path)}</strong>
                     <small>{formatDateTime(record.createdAt)} · {formatBytes(record.sizeBytes)}</small>
-                    <code title={record.path}>{record.path}</code>
+                  <details className="backup-file-location"><summary>文件位置</summary><code>{record.path}</code></details>
                     {!record.isAvailable ? <em>文件已不在登记位置</em> : null}
                   </div>
                   <div className="backup-record-actions">
