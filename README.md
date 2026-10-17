@@ -2,6 +2,37 @@
 
 砚台是一款面向深度阅读的 Windows 桌面应用。你可以在同一个项目中阅读 PDF、标记原文、记录想法，并把摘录整理成卡片和写作提纲。资料默认保存在本机，核心功能不需要账号、云服务或生成式 AI。
 
+## 界面预览
+
+阅读台将 PDF、阅读思考与本篇卡片并排展示，方便在原文和自己的记录之间切换。
+
+![阅读台：PDF 高亮、下划线、阅读思考与摘录卡片](docs/screenshots/reading.png)
+
+<details>
+<summary>查看更多界面：卡片库、二次整理与写作提纲</summary>
+
+### 卡片库
+
+按来源文献回顾摘录与个人笔记，查看标签、整理分类，并随时返回原文。
+
+![卡片库：按文献分组浏览摘录、个人笔记和整理状态](docs/screenshots/library.png)
+
+### 二次整理
+
+用自己的分类串联不同文献中的卡片，逐步发现主题、问题和写作线索。
+
+![二次整理：通过自定义分类组织跨文献卡片](docs/screenshots/synthesis.png)
+
+### 写作提纲
+
+建立多级章节，记录论点与待解决的问题，再将卡片关联到相应位置。
+
+![写作提纲：章节层级、写作说明与关联卡片](docs/screenshots/outline.png)
+
+</details>
+
+截图中的文献与笔记均为示例资料。
+
 ## 下载与安装
 
 在 [Releases 页面](https://github.com/MoZiBai/inkstone-research/releases) 下载最新的 Windows 安装程序（文件名以 `_x64-setup.exe` 结尾），运行后按提示安装。当前提供 Windows x64 版本，尚未提供 macOS 或 Linux 安装包。
