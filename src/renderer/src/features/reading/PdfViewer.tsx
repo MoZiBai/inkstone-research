@@ -33,6 +33,7 @@ import type {
   ProjectCardView
 } from '@shared/types'
 import { api } from '../../lib/api'
+import { readReadingProgress, saveReadingProgress, canvasOutputScale } from './readingProgress'
 import { ContextMenu } from '../../components/ContextMenu'
 import type { Notify } from '../../types'
 import {
@@ -52,6 +53,7 @@ const EMPTY_PROJECT_CARDS: ProjectCardView[] = []
 const EMPTY_PDF_SEARCH_MATCHES: PdfTextSearchMatch[] = []
 
 interface PdfViewerProps {
+  isActive: boolean
   document: DocumentSummary
   annotations: PdfAnnotation[]
   cards: ProjectCardView[]
@@ -65,6 +67,7 @@ interface PdfViewerProps {
   onRequestEditAnnotation: (annotation: PdfAnnotation) => void
   onUpdateAnnotation: (annotation: PdfAnnotation, color: string, comment: string) => Promise<boolean>
   onCurrentPageChange: (pageNumber: number) => void
+  onFocusHandled: () => void
   onNotify: Notify
 }
 
@@ -89,6 +92,7 @@ interface SelectionColorPickerState extends ToolbarPosition {
 }
 
 export function PdfViewer({
+  isActive,
   document,
   annotations,
   cards,
@@ -102,8 +106,13 @@ export function PdfViewer({
   onRequestEditAnnotation,
   onUpdateAnnotation,
   onCurrentPageChange,
+  onFocusHandled,
   onNotify
 }: PdfViewerProps): React.JSX.Element {
+  const [resume] = useState(() => readReadingProgress(document.id))
+  const latestProgressRef = useRef(resume)
+  const [positionRestored, setPositionRestored] = useState(false)
+  const currentPageRef = useRef(resume.page)
   const stageRef = useRef<HTMLDivElement>(null)
   const pageRefs = useRef(new Map<number, HTMLDivElement>())
   const pageRefCallbacks = useRef(
@@ -111,8 +120,8 @@ export function PdfViewer({
   )
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const pdfRef = useRef<PDFDocumentProxy | null>(null)
-  const fitModeRef = useRef(true)
-  const scaleRef = useRef(1)
+  const fitModeRef = useRef(resume.fitWidth)
+  const scaleRef = useRef(resume.scale)
   const zoomFrameRef = useRef<number | null>(null)
   const focusHandledRef = useRef(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -121,8 +130,8 @@ export function PdfViewer({
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [pages, setPages] = useState<PageInfo[]>([])
   const [numPages, setNumPages] = useState(0)
-  const [scale, setScale] = useState(1)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [scale, setScale] = useState(resume.scale)
+  const [currentPage, setCurrentPage] = useState(resume.page)
   const [visiblePages, setVisiblePages] = useState<Set<number>>(() => new Set([1, 2]))
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [loadError, setLoadError] = useState('')
@@ -159,14 +168,16 @@ export function PdfViewer({
 
   useEffect(() => {
     const handleFindShortcut = (event: KeyboardEvent): void => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'f') return
+      if (!isActive || window.document.querySelector('[aria-modal="true"]') || !(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'f') return
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest('input, textarea, [contenteditable="true"]') && !stageRef.current?.parentElement?.contains(target)) return
       event.preventDefault()
       setSearchOpen(true)
       window.setTimeout(() => searchInputRef.current?.focus(), 0)
     }
     window.addEventListener('keydown', handleFindShortcut)
     return () => window.removeEventListener('keydown', handleFindShortcut)
-  }, [])
+  }, [isActive])
 
   useEffect(() => {
     if (!selection || !toolbarPosition) return undefined
@@ -183,15 +194,15 @@ export function PdfViewer({
     let cancelled = false
     let loadingTask: PDFDocumentLoadingTask | null = null
     let loadedPdf: PDFDocumentProxy | null = null
-    fitModeRef.current = true
-    scaleRef.current = 1
+    fitModeRef.current = resume.fitWidth
+    scaleRef.current = resume.scale
     focusHandledRef.current = 0
     setPdf(null)
     setPages([])
     pageRefs.current.clear()
     setNumPages(0)
-    setCurrentPage(1)
-    setScale(1)
+    setCurrentPage(resume.page)
+    setScale(resume.scale)
     setVisiblePages(new Set([1, 2]))
     setSelection(null)
     setToolbarPosition(null)
@@ -299,7 +310,7 @@ export function PdfViewer({
   }, [document.id])
 
   useEffect(() => {
-    if (!searchOpen || !pdf) return undefined
+    if (!isActive || !searchOpen || !pdf) return undefined
     const query = searchQuery.trim().toLocaleLowerCase()
     const generation = searchGenerationRef.current + 1
     searchGenerationRef.current = generation
@@ -357,13 +368,60 @@ export function PdfViewer({
     }, 180)
 
     return () => window.clearTimeout(timeout)
-  }, [pdf, searchOpen, searchQuery])
+  }, [isActive, pdf, searchOpen, searchQuery])
 
-  useEffect(() => onCurrentPageChange(currentPage), [currentPage, onCurrentPageChange])
+  useEffect(() => {
+    currentPageRef.current = currentPage
+    if (positionRestored) onCurrentPageChange(currentPage)
+  }, [currentPage, onCurrentPageChange, positionRestored])
+
+  useEffect(() => {
+    if (!isActive || loadState !== 'ready' || pages.length === 0 || positionRestored) return
+    const root = stageRef.current
+    if (!root || root.clientWidth === 0) return
+    const page = Math.min(resume.page, pages.length)
+    const frame = window.requestAnimationFrame(() => {
+      const element = pageRefs.current.get(page)
+      if (!element) return
+      const bounds = root.getBoundingClientRect()
+      const rect = element.getBoundingClientRect()
+      root.scrollTo({ top: Math.max(0, root.scrollTop + rect.top - bounds.top + resume.offset * rect.height - 16), left: resume.left * Math.max(0, root.scrollWidth - root.clientWidth), behavior: 'instant' })
+      currentPageRef.current = page
+      setCurrentPage(page)
+      setPositionRestored(true)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [isActive, loadState, pages.length, positionRestored, resume, scale])
+
+  useEffect(() => {
+    if (!isActive || !positionRestored) return
+    const root = stageRef.current
+    if (!root) return
+    const capture = (): void => {
+      const page = currentPageRef.current
+      const rect = pageRefs.current.get(page)?.getBoundingClientRect()
+      const bounds = root.getBoundingClientRect()
+      // Hidden views have zero-sized bounds. Keep the last visible position.
+      if (!rect || rect.height <= 0 || bounds.width <= 0 || bounds.height <= 0) return
+      latestProgressRef.current = {
+        page, scale: scaleRef.current, fitWidth: fitModeRef.current,
+        offset: Math.max(0, (bounds.top - rect.top) / rect.height),
+        left: root.scrollLeft / Math.max(1, root.scrollWidth - root.clientWidth)
+      }
+    }
+    const save = (): void => saveReadingProgress(document.id, latestProgressRef.current)
+    let timer: number | undefined
+    const onScroll = (): void => { capture(); window.clearTimeout(timer); timer = window.setTimeout(() => { capture(); save() }, 150) }
+    root.addEventListener('scroll', onScroll, { passive: true })
+    capture()
+    save()
+    return () => { window.clearTimeout(timer); capture(); save(); root.removeEventListener('scroll', onScroll) }
+  }, [document.id, isActive, positionRestored, scale])
+
 
   useEffect(() => {
     const root = stageRef.current
-    if (!root || pages.length === 0) return
+    if (!isActive || !root || pages.length === 0 || !positionRestored) return
 
     const renderObserver = new IntersectionObserver(
       (entries) => {
@@ -413,7 +471,7 @@ export function PdfViewer({
       renderObserver.disconnect()
       pageObserver.disconnect()
     }
-  }, [document.id, pages.length, scale])
+  }, [document.id, isActive, pages.length, positionRestored, scale])
 
   const firstPageWidth = pages[0]?.width ?? 0
   const fitToWidth = useCallback((): void => {
@@ -544,12 +602,15 @@ export function PdfViewer({
   }
 
   useEffect(() => {
-    if (!focusToken || focusToken === focusHandledRef.current || pages.length === 0) return
-    if (!focusPage || focusPage < 1 || focusPage > pages.length) return
-    focusHandledRef.current = focusToken
-    const timeout = window.setTimeout(() => scrollToPage(focusPage, focusLocator), 80)
+    if (!isActive || !positionRestored || !focusToken || focusToken === focusHandledRef.current || pages.length === 0) return
+    const timeout = window.setTimeout(() => {
+      if (focusPage && focusPage >= 1 && focusPage <= pages.length) scrollToPage(focusPage, focusLocator)
+      else if (focusPage) onNotify('原记录的页码超出当前 PDF 范围，请核对重新链接的文件。', 'warning')
+      focusHandledRef.current = focusToken
+      onFocusHandled()
+    }, 80)
     return () => window.clearTimeout(timeout)
-  }, [focusLocator, focusPage, focusToken, pages.length, scrollToPage])
+  }, [isActive, positionRestored, focusLocator, focusPage, focusToken, pages.length, scrollToPage, onFocusHandled, onNotify])
 
   const handleSelection = useCallback(
     (pageNumber: number, pageElement: HTMLDivElement): void => {
@@ -922,7 +983,7 @@ export function PdfViewer({
           role="toolbar"
           aria-label="选区操作"
         >
-          <button type="button" onClick={createCard} title="创建研究卡片">
+          <button type="button" onClick={createCard} title="创建阅读卡片">
             <span className="selection-tool-mark card-mark">卡</span>摘录成卡片
           </button>
           <div className="selection-annotation-tool">
@@ -1204,7 +1265,7 @@ const PdfPageView = memo(function PdfPageView({
         const viewport = page.getViewport({ scale })
         // Keep high zoom useful for figures without allocating a second full
         // device-pixel copy of a page once the CSS zoom is already large.
-        const outputScale = Math.min(window.devicePixelRatio || 1, 2, Math.max(1, 4 / scale))
+        const outputScale = canvasOutputScale(viewport.width, viewport.height, window.devicePixelRatio || 1)
         canvas.width = Math.max(1, Math.floor(viewport.width * outputScale))
         canvas.height = Math.max(1, Math.floor(viewport.height * outputScale))
         canvas.style.width = `${viewport.width}px`

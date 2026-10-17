@@ -49,6 +49,14 @@ impl Repository {
         &self,
         requested_project_id: Option<&str>,
     ) -> AppResult<WorkspaceSnapshot> {
+        self.get_workspace_sections(requested_project_id, None)
+    }
+
+    pub fn get_workspace_sections(
+        &self,
+        requested_project_id: Option<&str>,
+        sections: Option<&[String]>,
+    ) -> AppResult<WorkspaceSnapshot> {
         let projects = {
             let mut statement = self.connection.prepare(
                 r#"
@@ -98,7 +106,16 @@ impl Repository {
             });
         };
 
-        let documents = {
+        // A fallback project needs a complete snapshot, not sections from the old project.
+        let sections = if requested_project_id == Some(project_id) {
+            sections
+        } else {
+            None
+        };
+        let include =
+            |name: &str| sections.is_none_or(|items| items.iter().any(|item| item == name));
+
+        let documents = if include("documents") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT d.id, d.title, d.authors, d.year,
@@ -145,9 +162,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let document_groups = {
+        let document_groups = if include("documentGroups") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, parent_id, name, sort_order, created_at, updated_at
@@ -168,9 +187,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let categories = {
+        let categories = if include("categories") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, name, color, sort_order, is_default,
@@ -193,9 +214,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let research_roles = {
+        let research_roles = if include("researchRoles") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, name, color, sort_order, is_default, is_archived,
@@ -207,9 +230,11 @@ impl Repository {
             )?;
             let rows = statement.query_map(params![project_id], research_role_from_row)?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let mut cards = {
+        let mut cards = if include("cards") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT pc.id, pc.project_id, pc.excerpt_id,
@@ -278,9 +303,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let roles_by_card = {
+        let roles_by_card = if include("cards") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT pcr.project_card_id,
@@ -315,12 +342,14 @@ impl Repository {
                 result.entry(card_id).or_default().push(role);
             }
             result
+        } else {
+            BTreeMap::new()
         };
         for card in &mut cards {
             card.research_roles = roles_by_card.get(&card.id).cloned().unwrap_or_default();
         }
 
-        let pdf_annotations = {
+        let pdf_annotations = if include("pdfAnnotations") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, document_id, kind, page_number, color,
@@ -346,9 +375,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let reading_notes = {
+        let reading_notes = if include("readingNotes") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, document_id, kind, content, selected_text,
@@ -373,9 +404,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let outline_nodes = {
+        let outline_nodes = if include("outlineNodes") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT id, project_id, parent_id, title, notes, core_argument,
@@ -400,9 +433,11 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
-        let outline_links = {
+        let outline_links = if include("outlineLinks") {
             let mut statement = self.connection.prepare(
                 r#"
                 SELECT ocl.id, ocl.outline_node_id, ocl.project_card_id,
@@ -424,6 +459,8 @@ impl Repository {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
         };
 
         Ok(WorkspaceSnapshot {
@@ -3963,6 +4000,38 @@ mod tests {
             .group_id
             .is_none());
         assert!(ungrouped.cards.iter().any(|card| card.id == "seed-card-1"));
+    }
+
+    #[test]
+    fn scoped_workspace_omits_unrequested_queries_and_keeps_card_data_complete() {
+        let repository = Repository::memory().expect("memory database");
+        repository
+            .connection
+            .execute("DROP TABLE pdf_annotations", [])
+            .expect("remove unrelated test table");
+        let snapshot = repository
+            .get_workspace_sections(Some("seed-project-tombs"), Some(&["cards".to_owned()]))
+            .expect("cards do not query unrelated sections");
+        assert!(!snapshot.cards.is_empty());
+        assert!(!snapshot.projects.is_empty());
+        assert!(snapshot.documents.is_empty());
+        assert!(snapshot.categories.is_empty());
+        assert!(snapshot.pdf_annotations.is_empty());
+        assert!(snapshot.reading_notes.is_empty());
+        assert!(snapshot.outline_links.is_empty());
+        assert!(snapshot.cards.iter().any(|card| !card.tags.is_empty()));
+    }
+
+    #[test]
+    fn scoped_workspace_fallback_loads_the_entire_replacement_project() {
+        let repository = Repository::memory().expect("memory database");
+        let snapshot = repository
+            .get_workspace_sections(Some("nonexistent-project"), Some(&["cards".to_owned()]))
+            .expect("fallback workspace");
+        assert!(snapshot.current_project_id.is_some());
+        assert!(!snapshot.documents.is_empty());
+        assert!(!snapshot.categories.is_empty());
+        assert!(!snapshot.cards.is_empty());
     }
 
     #[test]

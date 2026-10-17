@@ -98,6 +98,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        data-unsaved={hasUnsavedChanges ? 'true' : undefined}
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
         onClickCapture={(event) => {

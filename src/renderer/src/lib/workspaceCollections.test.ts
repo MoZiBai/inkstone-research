@@ -110,5 +110,8 @@ describe('outline workspace indexes', () => {
     expect(indexes.linksByNodeId.get('chapter-a')).toHaveLength(1)
     expect(indexes.linkedCardIdsByNodeId.get('chapter-b')?.has('card-a')).toBe(true)
     expect(indexes.usageTitlesByCardId.get('card-a')).toEqual(['章节 1', '章节 2'])
+    const nested = { ...nodes[1]!, parentId: nodes[0]!.id } satisfies OutlineNode
+    const nestedIndexes = buildOutlineWorkspaceIndexes([nodes[0]!, nested], cards, links)
+    expect(nestedIndexes.usageTitlesByCardId.get('card-a')).toEqual(['章节 1', '章节 1 / 章节 2'])
   })
 })

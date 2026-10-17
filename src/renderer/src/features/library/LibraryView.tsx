@@ -18,6 +18,9 @@ import { ContextMenu } from '../../components/ContextMenu'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog } from '../../components/Modal'
 import { api } from '../../lib/api'
+import { usePersistentSet, usePersistentState } from '../../lib/preferences'
+import { CardText } from '../../components/CardText'
+import { descendantDocumentGroupIds } from '../reading/documentGroups'
 import {
   filterProjectCards,
   groupCardsByDocument,
@@ -42,17 +45,19 @@ export function LibraryView({
   onLocateSynthesis,
   onOpenSource
 }: LibraryViewProps): React.JSX.Element {
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = usePersistentState(`inkstone:library-query:${snapshot.currentProjectId}`, '')
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
-  const [stateFilter, setStateFilter] = useState<CardStateFilter>('all')
-  const [collapsedDocumentIds, setCollapsedDocumentIds] = useState<Set<string>>(
-    () => new Set()
-  )
+  const [stateFilter, setStateFilter] = usePersistentState<CardStateFilter>(`inkstone:library-filter:${snapshot.currentProjectId}`, 'all')
+  const [collapsedDocumentIds, setCollapsedDocumentIds] = usePersistentSet<string>(`inkstone:library-collapsed:${snapshot.currentProjectId}`)
+  const [sourceFilter, setSourceFilter] = usePersistentState(`inkstone:library-source:${snapshot.currentProjectId}`, '')
+  useEffect(() => {
+    if (sourceFilter.startsWith('doc:') && !snapshot.documents.some((document) => document.id === sourceFilter.slice(4))) setSourceFilter('')
+    if (sourceFilter.startsWith('group:') && !snapshot.documentGroups.some((group) => group.id === sourceFilter.slice(6))) setSourceFilter('')
+  }, [sourceFilter, snapshot.documents, snapshot.documentGroups, setSourceFilter])
+  const [cardLimits, setCardLimits] = useState<Record<string, number>>({})
   const [editingCard, setEditingCard] = useState<ProjectCardView | null>(null)
   const [deletingCard, setDeletingCard] = useState<ProjectCardView | null>(null)
-  const [expandedDocumentIds, setExpandedDocumentIds] = useState<Set<string>>(
-    () => new Set()
-  )
+  const [expandedDocumentIds, setExpandedDocumentIds] = usePersistentSet<string>(`inkstone:library-expanded:${snapshot.currentProjectId}`)
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
   const [cardContextMenu, setCardContextMenu] = useState<{
     x: number
@@ -61,8 +66,16 @@ export function LibraryView({
   } | null>(null)
 
   const filteredCards = useMemo(
-    () => filterProjectCards(snapshot.cards, deferredQuery, stateFilter),
-    [deferredQuery, snapshot.cards, stateFilter]
+    () => {
+      const filtered = filterProjectCards(snapshot.cards, deferredQuery, stateFilter)
+      if (!sourceFilter) return filtered
+      if (sourceFilter.startsWith('doc:')) return filtered.filter((card) => card.documentId === sourceFilter.slice(4))
+      const ids = descendantDocumentGroupIds(snapshot.documentGroups, sourceFilter.slice(6))
+      ids.add(sourceFilter.slice(6))
+      const documents = new Set(snapshot.documents.filter((document) => document.groupId && ids.has(document.groupId)).map((document) => document.id))
+      return filtered.filter((card) => documents.has(card.documentId))
+    },
+    [deferredQuery, snapshot.cards, snapshot.documents, snapshot.documentGroups, sourceFilter, stateFilter]
   )
   const cardsByDocument = useMemo(
     () => groupCardsByDocument(filteredCards),
@@ -80,13 +93,13 @@ export function LibraryView({
           document,
           cards: cardsByDocument.get(document.id) ?? []
         }))
-        .filter((group) => group.cards.length > 0 || (!deferredQuery && stateFilter === 'all'))
+        .filter((group) => group.cards.length > 0 || (!deferredQuery && !sourceFilter && stateFilter === 'all'))
         .sort((first, second) => {
           if (first.document.id === currentReadingDocumentId) return -1
           if (second.document.id === currentReadingDocumentId) return 1
           return first.document.sortOrder - second.document.sortOrder
         }),
-    [cardsByDocument, currentReadingDocumentId, deferredQuery, snapshot.documents, stateFilter]
+    [cardsByDocument, currentReadingDocumentId, deferredQuery, snapshot.documents, sourceFilter, stateFilter]
   )
 
   const cardStateCounts = useMemo(
@@ -99,9 +112,9 @@ export function LibraryView({
   )
 
   useEffect(() => {
-    const availableIds = new Set(snapshot.cards.map((card) => card.id))
+    const availableIds = new Set(filteredCards.map((card) => card.id))
     setSelectedCardIds((current) => new Set([...current].filter((id) => availableIds.has(id))))
-  }, [snapshot.cards])
+  }, [filteredCards])
 
   const toggleCardSelection = (cardId: string): void => {
     setSelectedCardIds((current) => {
@@ -177,7 +190,7 @@ export function LibraryView({
             disabled={filteredCards.length === 0}
             onClick={toggleVisibleSelection}
           >
-            {allVisibleSelected ? '取消当前选择' : `选择当前 ${filteredCards.length} 张`}
+            {allVisibleSelected ? '取消筛选结果选择' : `选择全部筛选结果 ${filteredCards.length} 张`}
           </button>
           <div className="segmented-control library-state-filter" aria-label="卡片整理状态筛选">
             {(['all', 'active', 'excluded'] as const).map((state) => (
@@ -208,6 +221,11 @@ export function LibraryView({
             {allDocumentsCollapsed ? <ChevronsDown size={15} /> : <ChevronsUp size={15} />}
             {allDocumentsCollapsed ? '全部展开' : '全部收起'}
           </button>
+          <select className="library-document-filter" aria-label="按文献或文献分类筛选" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+            <option value="">全部来源</option>
+            <optgroup label="文献分类">{snapshot.documentGroups.map((group) => <option key={group.id} value={`group:${group.id}`}>{group.name}</option>)}</optgroup>
+            <optgroup label="文献">{snapshot.documents.map((document) => <option key={document.id} value={`doc:${document.id}`}>{document.title}</option>)}</optgroup>
+          </select>
           <label className="search-box">
             <Search size={16} />
             <input
@@ -232,9 +250,7 @@ export function LibraryView({
         {groups.map(({ document, cards }) => {
           const collapsed = !deferredQuery && collapsedDocumentIds.has(document.id)
           const cardsExpanded = Boolean(deferredQuery) || expandedDocumentIds.has(document.id)
-          const visibleCards = cardsExpanded
-            ? cards
-            : cards.slice(0, libraryCardPreviewCount)
+          const visibleCards = cards.slice(0, cardsExpanded ? (cardLimits[document.id] ?? 50) : libraryCardPreviewCount)
           const hiddenCardCount = cards.length - visibleCards.length
           return (
           <section className={`document-group ${collapsed ? 'collapsed' : ''} ${document.id === currentReadingDocumentId ? 'current-reading-document' : ''}`} key={document.id}>
@@ -305,21 +321,12 @@ export function LibraryView({
                             >
                               {role.name}
                             </span>
-                          )) : <span className="soft-pill">未设置研究作用</span>}
+                          )) : <span className="soft-pill">未设置卡片用途</span>}
                           {card.rawText !== card.displayText ? (
                             <span className="soft-pill">保留原始版本</span>
                           ) : null}
                         </div>
-                        {card.comment ? (
-                          <div className="research-comment">
-                            <span>我的笔记</span>
-                            <p>{card.comment}</p>
-                          </div>
-                        ) : null}
-                        <div className="card-evidence">
-                          <span>原文摘录</span>
-                          <blockquote>{card.displayText}</blockquote>
-                        </div>
+                        <CardText card={card} />
                         <div className="tag-list">
                           {card.tags.map((tag) => (
                             <span key={tag}>{tag}</span>
@@ -364,6 +371,7 @@ export function LibraryView({
                     </article>
                   )
                 })}
+                {hiddenCardCount > 0 && cardsExpanded ? <button className="library-card-overflow" type="button" onClick={() => setCardLimits((limits) => ({ ...limits, [document.id]: (limits[document.id] ?? 50) + 50 }))}>再显示 {Math.min(50, hiddenCardCount)} 张 · 剩余 {hiddenCardCount} 张</button> : null}
                 {!deferredQuery && cards.length > libraryCardPreviewCount ? (
                   <button
                     className="library-card-overflow"
@@ -373,7 +381,7 @@ export function LibraryView({
                     {cardsExpanded ? (
                       <><ChevronsUp size={15} /> 收起，仅显示前 {libraryCardPreviewCount} 张</>
                     ) : (
-                      <><ChevronsDown size={15} /> 展开其余 {hiddenCardCount} 张</>
+                      <><ChevronsDown size={15} /> 展开更多（共 {cards.length} 张）</>
                     )}
                   </button>
                 ) : null}
@@ -454,6 +462,7 @@ export function LibraryView({
         <CardEditDialog
           card={editingCard}
           researchRoles={snapshot.researchRoles}
+          availableTags={[...new Set(snapshot.cards.flatMap((card) => card.tags))]}
           outlineUsages={snapshot.outlineLinks
             .filter((link) => link.projectCardId === editingCard.id)
             .map((link) => ({
@@ -463,7 +472,7 @@ export function LibraryView({
             }))}
           onSave={saveCard}
           onClose={() => setEditingCard(null)}
-          onOpenSource={() => onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson)}
+          onOpenSource={() => { setEditingCard(null); onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson) }}
         />
       ) : null}
       {deletingCard ? (

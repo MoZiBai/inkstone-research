@@ -404,6 +404,14 @@ pub struct BackupPreferences {
     pub last_cleanup_result: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRuntimeStatus {
+    pub next_backup_at: Option<String>,
+    pub last_error: Option<String>,
+    pub running: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupManagerState {

@@ -1382,7 +1382,7 @@ select:focus-visible {
   height: 100%;
   min-height: 0;
   overflow: auto;
-  padding: 31px 34px 48px;
+  padding: 22px 28px 36px;
 }
 
 .eyebrow {
@@ -1401,14 +1401,14 @@ select:focus-visible {
   justify-content: space-between;
   gap: 24px;
   max-width: 1160px;
-  margin: 0 auto 25px;
+  margin: 0 auto 18px;
 }
 
 .view-heading h1 {
   margin: 6px 0 5px;
   color: var(--ink-950);
   font-family: var(--serif);
-  font-size: calc(30px + var(--font-delta));
+  font-size: calc(24px + var(--font-delta));
   font-weight: 700;
   letter-spacing: 0.015em;
 }

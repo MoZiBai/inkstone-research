@@ -25,9 +25,9 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-fn exit_application(app: &tauri::AppHandle) {
-    EXIT_REQUESTED.store(true, Ordering::SeqCst);
-    app.exit(0);
+fn request_exit(app: &tauri::AppHandle) {
+    show_main_window(app);
+    let _ = app.emit("app-close-requested", ());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,7 +49,7 @@ pub fn run() {
                 backup_directory,
                 pdf_library_directory,
             );
-            state.start_backup_scheduler();
+            state.start_backup_scheduler(app.handle().clone());
             app.manage(state);
 
             let open_item = MenuItem::with_id(app, "open", "打开窗口", true, None::<&str>)?;
@@ -60,7 +60,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main_window(app),
-                    "exit" => exit_application(app),
+                    "exit" => request_exit(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -110,6 +110,7 @@ pub fn run() {
             commands::import_project_database,
             commands::preview_database_import,
             commands::get_backup_manager,
+            commands::get_backup_runtime,
             commands::update_backup_settings,
             commands::create_backup_snapshot,
             commands::cleanup_backups,

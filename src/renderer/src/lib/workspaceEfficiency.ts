@@ -13,6 +13,8 @@ export type DocumentFilter = 'all' | 'available' | 'unlinked' | 'missing'
 export interface ProjectSearchResults {
   documents: DocumentSummary[]
   cards: ProjectCardView[]
+  documentTotal: number
+  cardTotal: number
 }
 
 const chineseCollator = new Intl.Collator('zh-CN', {
@@ -67,10 +69,9 @@ export function searchCurrentProject(
   limitPerGroup = 8
 ): ProjectSearchResults {
   const normalizedQuery = normalizeQuery(query)
-  if (!normalizedQuery) return { documents: [], cards: [] }
+  if (!normalizedQuery) return { documents: [], cards: [], documentTotal: 0, cardTotal: 0 }
 
-  return {
-    documents: snapshot.documents
+  const documents = snapshot.documents
       .filter((document) => searchable([
         document.title,
         document.authors,
@@ -79,8 +80,7 @@ export function searchCurrentProject(
         document.doi
       ]).includes(normalizedQuery))
       .sort((left, right) => compareDocuments(left, right, 'updated'))
-      .slice(0, limitPerGroup),
-    cards: snapshot.cards
+  const cards = snapshot.cards
       .filter((card) => searchable([
         card.displayText,
         card.comment,
@@ -89,7 +89,11 @@ export function searchCurrentProject(
         ...card.tags
       ]).includes(normalizedQuery))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, limitPerGroup)
+  return {
+    documents: documents.slice(0, limitPerGroup),
+    cards: cards.slice(0, limitPerGroup),
+    documentTotal: documents.length,
+    cardTotal: cards.length
   }
 }
 

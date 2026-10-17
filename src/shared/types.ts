@@ -165,6 +165,8 @@ export interface OutlineCardLink {
   createdAt: string
 }
 
+export type WorkspaceSection = 'documents' | 'documentGroups' | 'categories' | 'researchRoles' | 'cards' | 'pdfAnnotations' | 'readingNotes' | 'outlineNodes' | 'outlineLinks'
+
 export interface WorkspaceSnapshot {
   projects: ProjectSummary[]
   currentProjectId: string | null
@@ -314,6 +316,12 @@ export interface BackupSettings {
   lastCleanupResult: string | null
 }
 
+export interface BackupRuntimeStatus {
+  nextBackupAt: string | null
+  lastError: string | null
+  running: boolean
+}
+
 export interface BackupManagerState {
   settings: BackupSettings
   records: BackupRecord[]
@@ -448,7 +456,7 @@ export interface UpdateOutlineCardLinkInput {
 }
 
 export interface InkstoneApi {
-  getWorkspace: (projectId?: string) => Promise<WorkspaceSnapshot>
+  getWorkspace: (projectId?: string, sections?: WorkspaceSection[]) => Promise<WorkspaceSnapshot>
   createProject: (input: CreateProjectInput) => Promise<string>
   updateProject: (input: UpdateProjectInput) => Promise<void>
   removeProject: (projectId: string) => Promise<void>
@@ -467,6 +475,7 @@ export interface InkstoneApi {
   importDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   importProjectDatabase: (sourcePath: string) => Promise<DatabaseImportResult>
   previewDatabaseImport: (sourcePath: string, projectOnly: boolean) => Promise<DatabaseImportPreview>
+  getBackupRuntime: () => Promise<BackupRuntimeStatus>
   getBackupManager: () => Promise<BackupManagerState>
   createBackupSnapshot: () => Promise<BackupManagerState>
   hideToTray: () => Promise<void>

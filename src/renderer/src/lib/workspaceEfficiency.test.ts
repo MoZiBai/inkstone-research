@@ -43,6 +43,13 @@ it('searches current project documents and card excerpts, notes and tags', () =>
 })
 
 describe('PDF filenames', () => {
+  it('reports all matching results even when only a first page is rendered', () => {
+    const snapshot = { projects, currentProjectId: 'p1', documents, documentGroups: [], cards: Array.from({ length: 25 }, (_, index) => ({ ...card, id: `c${index}` })), categories: [], researchRoles: [], pdfAnnotations: [], readingNotes: [], outlineNodes: [], outlineLinks: [] } satisfies WorkspaceSnapshot
+    const results = searchCurrentProject(snapshot, '年代')
+    expect(results.cardTotal).toBe(25)
+    expect(results.cards).toHaveLength(8)
+    expect(searchCurrentProject(snapshot, '年代', 28).cards).toHaveLength(25)
+  })
   it('derives editable titles for Windows and POSIX paths', () => {
     expect(titleFromPdfPath('C:\\papers\\论文一.PDF')).toBe('论文一')
     expect(titleFromPdfPath('/tmp/paper.pdf')).toBe('paper')

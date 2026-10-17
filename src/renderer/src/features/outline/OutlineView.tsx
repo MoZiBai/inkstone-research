@@ -14,7 +14,7 @@ import {
   Trash2,
   Unlink
 } from 'lucide-react'
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   CreateOutlineNodeInput,
   OutlineCardLink,
@@ -28,6 +28,8 @@ import { CardEditDialog } from '../../components/CardEditDialog'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
+import { CardText } from '../../components/CardText'
+import { usePersistentSet, usePersistentState } from '../../lib/preferences'
 import { flattenOutline } from '../../lib/outline'
 import { buildOutlineWorkspaceIndexes, filterProjectCards } from '../../lib/workspaceCollections'
 import type { RunMutation } from '../../types'
@@ -48,14 +50,12 @@ export function OutlineView({
   runMutation,
   onOpenSource
 }: OutlineViewProps): React.JSX.Element {
-  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(() => new Set())
+  const [collapsedNodeIds, setCollapsedNodeIds] = usePersistentSet<string>(`inkstone:outline-collapsed:${snapshot.currentProjectId}`)
   const flatNodes = useMemo(
     () => flattenOutline(snapshot.outlineNodes, collapsedNodeIds),
     [collapsedNodeIds, snapshot.outlineNodes]
   )
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
-    flatNodes[0]?.node.id ?? null
-  )
+  const [selectedNodeId, setSelectedNodeId] = usePersistentState<string>(`inkstone:outline-selected:${snapshot.currentProjectId}`, flatNodes[0]?.node.id ?? '')
   const [nodeDialog, setNodeDialog] = useState<
     { mode: 'new'; parentId: string | null } | { mode: 'edit'; node: OutlineNode } | null
   >(null)
@@ -64,7 +64,30 @@ export function OutlineView({
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
   const [viewingCard, setViewingCard] = useState<ProjectCardView | null>(null)
   const [editingLink, setEditingLink] = useState<OutlineCardLink | null>(null)
-  const [cardQuery, setCardQuery] = useState('')
+  const [cardQuery, setCardQuery] = usePersistentState(`inkstone:outline-query:${snapshot.currentProjectId}`, '')
+  const [poolCategory, setPoolCategory] = usePersistentState(`inkstone:outline-category:${snapshot.currentProjectId}`, '')
+  const [poolDocument, setPoolDocument] = usePersistentState(`inkstone:outline-document:${snapshot.currentProjectId}`, '')
+  const [poolLimit, setPoolLimit] = useState(50)
+  const [poolWidth, setPoolWidth] = usePersistentState(`inkstone:outline-pool-width:${snapshot.currentProjectId}`, 320)
+  const [resizing, setResizing] = useState(false)
+  const layoutRef = useRef<HTMLDivElement>(null)
+  useEffect(() => setPoolLimit(50), [cardQuery, poolCategory, poolDocument])
+  useEffect(() => {
+    if (poolCategory && !snapshot.categories.some((category) => category.id === poolCategory)) setPoolCategory('')
+    if (poolDocument && !snapshot.documents.some((document) => document.id === poolDocument)) setPoolDocument('')
+  }, [poolCategory, poolDocument, snapshot.categories, snapshot.documents, setPoolCategory, setPoolDocument])
+  useEffect(() => {
+    if (!resizing) return
+    const move = (event: PointerEvent): void => {
+      const bounds = layoutRef.current?.getBoundingClientRect()
+      if (bounds) setPoolWidth(Math.max(240, Math.min(500, bounds.width - 320, bounds.right - event.clientX)))
+    }
+    const stop = (): void => setResizing(false)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop, { once: true })
+    window.addEventListener('pointercancel', stop, { once: true })
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); window.removeEventListener('pointercancel', stop) }
+  }, [resizing, setPoolWidth])
   const [hideLinkedToSelected, setHideLinkedToSelected] = useState(false)
   const deferredCardQuery = useDeferredValue(cardQuery.trim().toLocaleLowerCase())
 
@@ -86,15 +109,15 @@ export function OutlineView({
 
   useEffect(() => {
     if (selectedNodeId && flatNodes.some(({ node }) => node.id === selectedNodeId)) return
-    setSelectedNodeId(flatNodes[0]?.node.id ?? null)
+    setSelectedNodeId(flatNodes[0]?.node.id ?? '')
   }, [flatNodes, selectedNodeId])
 
   const activeCards = useMemo(() => {
-    const matching = filterProjectCards(snapshot.cards, deferredCardQuery, 'active')
+    const matching = filterProjectCards(snapshot.cards, deferredCardQuery, 'active').filter((card) => (!poolCategory || card.categoryId === poolCategory) && (!poolDocument || card.documentId === poolDocument))
     if (!hideLinkedToSelected || !selectedNodeId) return matching
     const linkedIds = indexes.linkedCardIdsByNodeId.get(selectedNodeId) ?? new Set<string>()
     return matching.filter((card) => !linkedIds.has(card.id))
-  }, [deferredCardQuery, hideLinkedToSelected, indexes.linkedCardIdsByNodeId, selectedNodeId, snapshot.cards])
+  }, [deferredCardQuery, poolCategory, poolDocument, hideLinkedToSelected, indexes.linkedCardIdsByNodeId, selectedNodeId, snapshot.cards])
 
   const toggleNodeCollapsed = (nodeId: string): void => {
     setSelectedNodeId(nodeId)
@@ -142,7 +165,7 @@ export function OutlineView({
       <header className="view-heading">
         <div>
           <span className="eyebrow">用户自建结构</span>
-          <h1>论文提纲</h1>
+          <h1>写作提纲</h1>
           <p>章节结构由你创建；卡片进入章节时只建立关联，不移动原卡片。</p>
         </div>
         <button
@@ -154,12 +177,12 @@ export function OutlineView({
         </button>
       </header>
 
-      <div className="outline-layout">
+      <div className={`outline-layout ${resizing ? 'resizing' : ''}`} ref={layoutRef} style={{ '--outline-pool-width': `${poolWidth}px` } as React.CSSProperties}>
         <section className="outline-paper">
           <div className="paper-title-row">
             <div>
               <span className="eyebrow">结构草稿</span>
-              <h2>章节与证据</h2>
+              <h2>章节与卡片</h2>
             </div>
             <span>{snapshot.outlineNodes.length} 个章节节点</span>
           </div>
@@ -178,8 +201,8 @@ export function OutlineView({
                 }`}
                 key={node.id}
                 style={{ '--outline-depth': depth } as React.CSSProperties}
-                draggable
                 onDragStart={(event) => {
+                  if (!(event.target instanceof Element) || !event.target.closest('.outline-grip')) { event.preventDefault(); return }
                   setDraggedNodeId(node.id)
                   event.dataTransfer.effectAllowed = 'move'
                   event.dataTransfer.setData('text/plain', node.id)
@@ -191,7 +214,7 @@ export function OutlineView({
                 onDragOver={(event) => {
                   event.preventDefault()
                   if (!draggedNodeId || draggedNodeId === node.id) return
-                  const rect = event.currentTarget.getBoundingClientRect()
+                  const rect = (event.currentTarget.querySelector('.outline-node-main') ?? event.currentTarget).getBoundingClientRect()
                   const ratio = (event.clientY - rect.top) / rect.height
                   const placement: OutlinePlacement =
                     ratio < 0.26 ? 'before' : ratio > 0.74 ? 'after' : 'inside'
@@ -203,7 +226,7 @@ export function OutlineView({
                 }}
               >
                 <div className="outline-node-main" onClick={() => setSelectedNodeId(node.id)}>
-                  <span className="outline-grip">
+                  <span className="outline-grip" draggable title="拖动调整顺序和层级">
                     <GripVertical size={14} />
                   </span>
                   <button
@@ -288,7 +311,7 @@ export function OutlineView({
                             onClick={() => setViewingCard(card)}
                             title="打开卡片详情"
                           >
-                            <strong>{card.displayText}</strong>
+                            <CardText card={card} compact />
                             <small>
                               {card.documentAuthors || '未知作者'} · 第{' '}
                               {card.printPage ?? card.pdfPage ?? '—'} 页
@@ -370,11 +393,12 @@ export function OutlineView({
           ) : null}
         </section>
 
+        <div className="outline-resize-handle" role="separator" aria-label="调整提纲卡片栏宽度" aria-orientation="vertical" aria-valuemin={240} aria-valuemax={500} aria-valuenow={poolWidth} tabIndex={0} onPointerDown={(event) => { event.preventDefault(); setResizing(true) }} onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setPoolWidth((width) => Math.max(240, Math.min(500, width + (event.key === 'ArrowLeft' ? 20 : -20)))) } }} />
         <aside className="outline-card-pool">
           <div className="pool-heading">
             <div>
               <span className="eyebrow">二次整理卡片</span>
-              <h2>选择证据</h2>
+              <h2>选择卡片</h2>
             </div>
             <span>{activeCards.length}</span>
           </div>
@@ -386,6 +410,10 @@ export function OutlineView({
               placeholder="筛选卡片"
             />
           </label>
+          <div className="pool-filters">
+            <select aria-label="按整理分类筛选候选卡片" value={poolCategory} onChange={(event) => setPoolCategory(event.target.value)}><option value="">全部分类</option>{snapshot.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select>
+            <select aria-label="按文献筛选候选卡片" value={poolDocument} onChange={(event) => setPoolDocument(event.target.value)}><option value="">全部文献</option>{snapshot.documents.map((document) => <option key={document.id} value={document.id}>{document.title}</option>)}</select>
+          </div>
           {selectedNodeId ? (
             <div className="selected-chapter-note">
               <ChevronRight size={14} />
@@ -411,7 +439,7 @@ export function OutlineView({
             <small>{selectedLinkedCardIds.size}</small>
           </label>
           <div className="pool-card-list">
-            {activeCards.map((card) => {
+            {activeCards.slice(0, poolLimit).map((card) => {
               const linkedToSelected = selectedLinkedCardIds.has(card.id)
               const usageTitles = indexes.usageTitlesByCardId.get(card.id) ?? []
               const usageLabel =
@@ -419,9 +447,9 @@ export function OutlineView({
               return (
                 <article className="pool-card" key={card.id}>
                   <span>
-                    {card.documentAuthors || '未知作者'} · {card.printPage ?? card.pdfPage ?? '—'}
+                    {card.documentTitle} · {card.documentAuthors || '未知作者'} · {card.printPage ?? card.pdfPage ?? '—'}
                   </span>
-                  <p>{card.displayText}</p>
+                  <button className="pool-card-preview" type="button" onClick={() => setViewingCard(card)} title="查看卡片详情"><CardText card={card} compact /></button>
                   <div>
                     <small title={usageLabel}>{usageLabel}</small>
                     <button
@@ -442,6 +470,7 @@ export function OutlineView({
                 </article>
               )
             })}
+            {activeCards.length > poolLimit ? <button className="button ghost" type="button" onClick={() => setPoolLimit((count) => count + 50)}>再显示 50 张 · 剩余 {activeCards.length - poolLimit} 张</button> : null}
             {activeCards.length === 0 ? (
               <div className="pool-card-empty">
                 {deferredCardQuery
@@ -459,6 +488,7 @@ export function OutlineView({
         <CardEditDialog
           card={viewingCard}
           researchRoles={snapshot.researchRoles}
+          availableTags={[...new Set(snapshot.cards.flatMap((card) => card.tags))]}
           outlineUsages={snapshot.outlineLinks
             .filter((link) => link.projectCardId === viewingCard.id)
             .map((link) => ({
@@ -468,7 +498,7 @@ export function OutlineView({
             }))}
           onSave={saveViewingCard}
           onClose={() => setViewingCard(null)}
-          onOpenSource={() => onOpenSource(viewingCard.documentId, viewingCard.pdfPage, viewingCard.locatorJson)}
+          onOpenSource={() => { setViewingCard(null); onOpenSource(viewingCard.documentId, viewingCard.pdfPage, viewingCard.locatorJson) }}
         />
       ) : null}
       {nodeDialog ? (
@@ -609,7 +639,7 @@ function OutlineNodeDialog({
   return (
     <Modal
       title={state.mode === 'new' ? (state.parentId ? '新建子章节' : '新建一级章节') : '编辑章节'}
-      subtitle="章节结构和内容说明由研究者自行维护。"
+      subtitle="自行创建章节层级，记录写作说明、核心观点与待解决问题。"
       onClose={onClose}
       width="large"
       hasUnsavedChanges={hasUnsavedChanges}

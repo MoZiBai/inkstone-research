@@ -7,21 +7,22 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tauri::{ipc::Response, AppHandle, Manager, State};
+use tauri::{ipc::Response, AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::database::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    BackupCleanupResult, BackupManagerState, BackupSettings, BatchUpdateCardsInput,
-    CreateCardFromSelectionInput, CreateCategoryInput, CreateDocumentGroupInput,
-    CreateDocumentInput, CreateOutlineNodeInput, CreatePdfAnnotationInput, CreateProjectInput,
-    CreateReadingNoteInput, CreateResearchRoleInput, DatabaseImportPreview, DatabaseImportResult,
-    ImportPdfInput, ImportPdfResult, MoveDocumentToGroupInput, MoveOutlineNodeInput,
-    RemoveDocumentInput, UpdateBackupSettingsInput, UpdateCardInput, UpdateCategoryInput,
-    UpdateDocumentGroupInput, UpdateDocumentInput, UpdateDocumentPrintPageMappingInput,
-    UpdateOutlineCardLinkInput, UpdateOutlineNodeInput, UpdatePdfAnnotationInput,
-    UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput, WorkspaceSnapshot,
+    BackupCleanupResult, BackupManagerState, BackupRuntimeStatus, BackupSettings,
+    BatchUpdateCardsInput, CreateCardFromSelectionInput, CreateCategoryInput,
+    CreateDocumentGroupInput, CreateDocumentInput, CreateOutlineNodeInput,
+    CreatePdfAnnotationInput, CreateProjectInput, CreateReadingNoteInput, CreateResearchRoleInput,
+    DatabaseImportPreview, DatabaseImportResult, ImportPdfInput, ImportPdfResult,
+    MoveDocumentToGroupInput, MoveOutlineNodeInput, RemoveDocumentInput, UpdateBackupSettingsInput,
+    UpdateCardInput, UpdateCategoryInput, UpdateDocumentGroupInput, UpdateDocumentInput,
+    UpdateDocumentPrintPageMappingInput, UpdateOutlineCardLinkInput, UpdateOutlineNodeInput,
+    UpdatePdfAnnotationInput, UpdateProjectInput, UpdateReadingNoteInput, UpdateResearchRoleInput,
+    WorkspaceSnapshot,
 };
 use crate::pdf_files::{
     discard_managed_pdf, managed_pdf_is_available, prepare_pdf_copy, read_managed_pdf,
@@ -33,9 +34,29 @@ pub struct AppState {
     database_path: PathBuf,
     backup_directory: PathBuf,
     pdf_library_directory: PathBuf,
+    backup_runtime: Arc<Mutex<BackupRuntimeStatus>>,
 }
 
 impl AppState {
+    async fn run_repository<T, F>(&self, action: F) -> AppResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Repository) -> AppResult<T> + Send + 'static,
+    {
+        let repository = Arc::clone(&self.repository);
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut guard = repository.lock().map_err(|_| {
+                AppError::Validation("本地数据库状态不可用，请重新启动应用。".into())
+            })?;
+            if crate::EXIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(AppError::Validation("软件正在退出，请稍候。".into()));
+            }
+            action(&mut guard)
+        })
+        .await
+        .map_err(|error| AppError::Validation(format!("资料库操作失败：{error}")))?
+    }
+
     pub fn new(
         repository: Repository,
         database_path: PathBuf,
@@ -47,6 +68,7 @@ impl AppState {
             database_path,
             backup_directory,
             pdf_library_directory,
+            backup_runtime: Arc::new(Mutex::new(BackupRuntimeStatus::default())),
         }
     }
 
@@ -56,26 +78,78 @@ impl AppState {
             .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))
     }
 
-    pub fn start_backup_scheduler(&self) {
+    pub fn start_backup_scheduler(&self, app: AppHandle) {
         let repository = Arc::clone(&self.repository);
+        let runtime = Arc::clone(&self.backup_runtime);
         let default_directory = self.backup_directory.clone();
-        let _ = thread::Builder::new()
+        let thread_runtime = Arc::clone(&runtime);
+        if let Err(error) = thread::Builder::new()
             .name("inkstone-backup-scheduler".into())
             .spawn(move || {
                 let mut schedule = SessionBackupSchedule::default();
                 loop {
+                    if crate::EXIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     let now = Instant::now();
-                    if let Ok(mut guard) = repository.lock() {
-                        if let Ok(preferences) = guard.backup_preferences() {
-                            schedule.configure(preferences.automatic_interval_minutes, now);
-                            if schedule.take_due(now) {
-                                let _ = create_scheduled_backup(&mut guard, &default_directory);
+                    // Never queue a scheduler check behind an active import/write.
+                    if let Ok(mut guard) = repository.try_lock() {
+                        if crate::EXIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        match guard.backup_preferences() {
+                            Ok(preferences) => {
+                                schedule.configure(preferences.automatic_interval_minutes, now);
+                                let due = schedule.take_due(now);
+                                if due {
+                                    if let Ok(mut status) = thread_runtime.lock() {
+                                        status.running = true;
+                                        status.last_error = None;
+                                        let _ = app.emit("backup-status-changed", &*status);
+                                    }
+                                    let result =
+                                        create_scheduled_backup(&mut guard, &default_directory);
+                                    if let Ok(mut status) = thread_runtime.lock() {
+                                        status.running = false;
+                                        status.last_error =
+                                            result.err().map(|error| error.to_string());
+                                        if status.last_error.is_some() {
+                                            schedule.retry_after_failure(Instant::now());
+                                        }
+                                    }
+                                }
+                                if let Ok(mut status) = thread_runtime.lock() {
+                                    status.next_backup_at = schedule.next_due.map(|due| {
+                                        let remaining =
+                                            due.saturating_duration_since(Instant::now());
+                                        (Utc::now()
+                                            + chrono::Duration::seconds(remaining.as_secs() as i64))
+                                        .to_rfc3339()
+                                    });
+                                    if due {
+                                        let _ = app.emit("backup-status-changed", &*status);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if let Ok(mut status) = thread_runtime.lock() {
+                                    let message = error.to_string();
+                                    if status.last_error.as_ref() != Some(&message) {
+                                        status.last_error = Some(message);
+                                        let _ = app.emit("backup-status-changed", &*status);
+                                    }
+                                }
                             }
                         }
                     }
                     thread::sleep(Duration::from_secs(10));
                 }
-            });
+            })
+        {
+            if let Ok(mut status) = runtime.lock() {
+                status.last_error = Some(format!("自动备份未能启动：{error}"));
+            }
+        }
     }
 }
 
@@ -86,6 +160,10 @@ struct SessionBackupSchedule {
 }
 
 impl SessionBackupSchedule {
+    fn retry_after_failure(&mut self, now: Instant) {
+        self.next_due = Some(now + Duration::from_secs(60));
+    }
+
     fn configure(&mut self, interval_minutes: i64, now: Instant) {
         if self.interval_minutes == interval_minutes {
             return;
@@ -249,32 +327,60 @@ fn reveal_path(path: &Path, select_file: bool) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn get_workspace(
+pub async fn get_workspace(
     project_id: Option<String>,
+    sections: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> AppResult<WorkspaceSnapshot> {
-    let mut snapshot = state.lock()?.get_workspace(project_id.as_deref())?;
-    for document in &mut snapshot.documents {
-        document.file_available = document.file_path.as_deref().is_some_and(|path| {
-            managed_pdf_is_available(&PathBuf::from(path), &state.pdf_library_directory)
-        });
-    }
-    Ok(snapshot)
+    let repository = Arc::clone(&state.repository);
+    let pdf_directory = state.pdf_library_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = repository
+            .lock()
+            .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))?;
+        let mut snapshot = match sections.as_deref() {
+            Some(sections) => {
+                guard.get_workspace_sections(project_id.as_deref(), Some(sections))?
+            }
+            None => guard.get_workspace(project_id.as_deref())?,
+        };
+        for document in &mut snapshot.documents {
+            document.file_available = document
+                .file_path
+                .as_deref()
+                .is_some_and(|path| managed_pdf_is_available(&PathBuf::from(path), &pdf_directory));
+        }
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| AppError::Validation(format!("读取资料库失败：{error}")))?
 }
 
 #[tauri::command]
-pub fn create_project(input: CreateProjectInput, state: State<'_, AppState>) -> AppResult<String> {
-    state.lock()?.create_project(input)
+pub async fn create_project(
+    input: CreateProjectInput,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    state
+        .run_repository(move |repository| repository.create_project(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_project(input: UpdateProjectInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.update_project(input)
+pub async fn update_project(
+    input: UpdateProjectInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.update_project(input))
+        .await
 }
 
 #[tauri::command]
-pub fn remove_project(project_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    let discarded_paths = state.lock()?.remove_project(&project_id)?;
+pub async fn remove_project(project_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let discarded_paths = state
+        .run_repository(move |repository| repository.remove_project(&project_id))
+        .await?;
     for path in discarded_paths {
         // The database transaction is authoritative. A locked Windows file may
         // leave an unreferenced copy behind; it must not turn a successful data
@@ -285,29 +391,43 @@ pub fn remove_project(project_id: String, state: State<'_, AppState>) -> AppResu
 }
 
 #[tauri::command]
-pub fn create_document(
+pub async fn create_document(
     input: CreateDocumentInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_document(input)
+    state
+        .run_repository(move |repository| repository.create_document(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_document(input: UpdateDocumentInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.update_document(input)
+pub async fn update_document(
+    input: UpdateDocumentInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.update_document(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_document_print_page_mapping(
+pub async fn update_document_print_page_mapping(
     input: UpdateDocumentPrintPageMappingInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_document_print_page_mapping(input)
+    state
+        .run_repository(move |repository| repository.update_document_print_page_mapping(input))
+        .await
 }
 
 #[tauri::command]
-pub fn remove_document(input: RemoveDocumentInput, state: State<'_, AppState>) -> AppResult<()> {
-    let discarded_path = state.lock()?.remove_document(input)?;
+pub async fn remove_document(
+    input: RemoveDocumentInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let discarded_path = state
+        .run_repository(move |repository| repository.remove_document(input))
+        .await?;
     if let Some(path) = discarded_path {
         // The database transaction is authoritative. A locked Windows file may
         // leave an unreferenced copy behind; it must not turn a successful data
@@ -318,41 +438,51 @@ pub fn remove_document(input: RemoveDocumentInput, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
-pub fn restore_document(
+pub async fn restore_document(
     project_id: String,
     document_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.restore_document(&project_id, &document_id)
+    state
+        .run_repository(move |repository| repository.restore_document(&project_id, &document_id))
+        .await
 }
 
 #[tauri::command]
-pub fn create_document_group(
+pub async fn create_document_group(
     input: CreateDocumentGroupInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_document_group(input)
+    state
+        .run_repository(move |repository| repository.create_document_group(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_document_group(
+pub async fn update_document_group(
     input: UpdateDocumentGroupInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_document_group(input)
+    state
+        .run_repository(move |repository| repository.update_document_group(input))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_document_group(group_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_document_group(&group_id)
+pub async fn delete_document_group(group_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_document_group(&group_id))
+        .await
 }
 
 #[tauri::command]
-pub fn move_document_to_group(
+pub async fn move_document_to_group(
     input: MoveDocumentToGroupInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.move_document_to_group(input)
+    state
+        .run_repository(move |repository| repository.move_document_to_group(input))
+        .await
 }
 
 #[tauri::command]
@@ -623,13 +753,30 @@ pub async fn import_project_database(
 }
 
 #[tauri::command]
-pub fn get_backup_manager(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
-    let mut guard = state.lock()?;
-    backup_manager_state(&mut guard, &state.backup_directory)
+pub fn get_backup_runtime(state: State<'_, AppState>) -> AppResult<BackupRuntimeStatus> {
+    state
+        .backup_runtime
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| AppError::Validation("备份状态暂不可用。".into()))
 }
 
 #[tauri::command]
-pub fn update_backup_settings(
+pub async fn get_backup_manager(state: State<'_, AppState>) -> AppResult<BackupManagerState> {
+    let repository = Arc::clone(&state.repository);
+    let directory = state.backup_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = repository
+            .lock()
+            .map_err(|_| AppError::Validation("本地数据库状态不可用，请重新启动应用。".into()))?;
+        backup_manager_state(&mut guard, &directory)
+    })
+    .await
+    .map_err(|error| AppError::Validation(format!("读取备份列表失败：{error}")))?
+}
+
+#[tauri::command]
+pub async fn update_backup_settings(
     input: UpdateBackupSettingsInput,
     state: State<'_, AppState>,
 ) -> AppResult<BackupManagerState> {
@@ -639,14 +786,18 @@ pub fn update_backup_settings(
         .map(PathBuf::from)
         .map(|path| validated_writable_backup_directory(&path))
         .transpose()?;
-    let mut guard = state.lock()?;
-    guard.set_backup_preferences(
-        custom_directory.as_deref(),
-        input.retention_days,
-        input.retention_count,
-        input.automatic_interval_minutes,
-    )?;
-    backup_manager_state(&mut guard, &state.backup_directory)
+    let directory = state.backup_directory.clone();
+    state
+        .run_repository(move |repository| {
+            repository.set_backup_preferences(
+                custom_directory.as_deref(),
+                input.retention_days,
+                input.retention_count,
+                input.automatic_interval_minutes,
+            )?;
+            backup_manager_state(repository, &directory)
+        })
+        .await
 }
 
 fn create_scheduled_backup(repository: &mut Repository, default_directory: &Path) -> AppResult<()> {
@@ -697,32 +848,47 @@ pub async fn create_backup_snapshot(state: State<'_, AppState>) -> AppResult<Bac
 }
 
 #[tauri::command]
-pub fn cleanup_backups(state: State<'_, AppState>) -> AppResult<BackupCleanupResult> {
-    let mut guard = state.lock()?;
-    let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
-    guard.cleanup_automatic_backups(
-        &resolved.directory,
-        resolved.retention_days,
-        resolved.retention_count,
-    )
+pub async fn cleanup_backups(state: State<'_, AppState>) -> AppResult<BackupCleanupResult> {
+    let directory = state.backup_directory.clone();
+    state
+        .run_repository(move |repository| {
+            let resolved = resolved_backup_directory(repository, &directory)?;
+            repository.cleanup_automatic_backups(
+                &resolved.directory,
+                resolved.retention_days,
+                resolved.retention_count,
+            )
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn delete_automatic_backup(backup_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_automatic_backup(&backup_id)
+pub async fn delete_automatic_backup(
+    backup_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_automatic_backup(&backup_id))
+        .await
 }
 
 #[tauri::command]
-pub fn reveal_backup(backup_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    let path = state.lock()?.backup_record_path(&backup_id)?;
+pub async fn reveal_backup(backup_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let path = state
+        .run_repository(move |repository| repository.backup_record_path(&backup_id))
+        .await?;
     reveal_path(&path, true)
 }
 
 #[tauri::command]
-pub fn reveal_backup_directory(state: State<'_, AppState>) -> AppResult<()> {
-    let guard = state.lock()?;
-    let resolved = resolved_backup_directory(&guard, &state.backup_directory)?;
-    reveal_path(&resolved.directory, false)
+pub async fn reveal_backup_directory(state: State<'_, AppState>) -> AppResult<()> {
+    let directory = state.backup_directory.clone();
+    let path = state
+        .run_repository(move |repository| {
+            Ok(resolved_backup_directory(repository, &directory)?.directory)
+        })
+        .await?;
+    reveal_path(&path, false)
 }
 
 #[tauri::command]
@@ -736,9 +902,19 @@ pub fn hide_to_tray(app: AppHandle) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn exit_application(app: AppHandle) {
-    crate::EXIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-    app.exit(0);
+pub async fn exit_application(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    let repository = Arc::clone(&state.repository);
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = repository
+            .lock()
+            .map_err(|_| AppError::Validation("数据库正在恢复，请重试退出。".into()))?;
+        crate::EXIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(guard);
+        app.exit(0);
+        Ok(())
+    })
+    .await
+    .map_err(|error| AppError::Validation(format!("退出失败：{error}")))?
 }
 
 fn paths_refer_to_same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
@@ -761,220 +937,287 @@ pub async fn read_pdf(document_id: String, state: State<'_, AppState>) -> AppRes
 }
 
 #[tauri::command]
-pub fn reveal_pdf_in_file_manager(
+pub async fn reveal_pdf_in_file_manager(
     document_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    let pdf_path = state.lock()?.pdf_path(&document_id)?;
+    let pdf_path = state
+        .run_repository(move |repository| repository.pdf_path(&document_id))
+        .await?;
     reveal_managed_pdf(&pdf_path, &state.pdf_library_directory)
 }
 
 #[tauri::command]
-pub fn create_card_from_selection(
+pub async fn create_card_from_selection(
     input: CreateCardFromSelectionInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_card_from_selection(input)
+    state
+        .run_repository(move |repository| repository.create_card_from_selection(input))
+        .await
 }
 
 #[tauri::command]
-pub fn create_pdf_annotation(
+pub async fn create_pdf_annotation(
     input: CreatePdfAnnotationInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_pdf_annotation(input)
+    state
+        .run_repository(move |repository| repository.create_pdf_annotation(input))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_pdf_annotation(annotation_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_pdf_annotation(&annotation_id)
+pub async fn delete_pdf_annotation(
+    annotation_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_pdf_annotation(&annotation_id))
+        .await
 }
 
 #[tauri::command]
-pub fn update_pdf_annotation(
+pub async fn update_pdf_annotation(
     input: UpdatePdfAnnotationInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_pdf_annotation(input)
+    state
+        .run_repository(move |repository| repository.update_pdf_annotation(input))
+        .await
 }
 
 #[tauri::command]
-pub fn create_reading_note(
+pub async fn create_reading_note(
     input: CreateReadingNoteInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_reading_note(input)
+    state
+        .run_repository(move |repository| repository.create_reading_note(input))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_reading_note(note_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_reading_note(&note_id)
+pub async fn delete_reading_note(note_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_reading_note(&note_id))
+        .await
 }
 
 #[tauri::command]
-pub fn update_reading_note(
+pub async fn update_reading_note(
     input: UpdateReadingNoteInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_reading_note(input)
+    state
+        .run_repository(move |repository| repository.update_reading_note(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_card(input: UpdateCardInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.update_card(input)
+pub async fn update_card(input: UpdateCardInput, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.update_card(input))
+        .await
 }
 
 #[tauri::command]
-pub fn batch_update_cards(
+pub async fn batch_update_cards(
     input: BatchUpdateCardsInput,
     state: State<'_, AppState>,
 ) -> AppResult<usize> {
-    state.lock()?.batch_update_cards(input)
+    state
+        .run_repository(move |repository| repository.batch_update_cards(input))
+        .await
 }
 
 #[tauri::command]
-pub fn create_research_role(
+pub async fn create_research_role(
     input: CreateResearchRoleInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_research_role(input)
+    state
+        .run_repository(move |repository| repository.create_research_role(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_research_role(
+pub async fn update_research_role(
     input: UpdateResearchRoleInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_research_role(input)
+    state
+        .run_repository(move |repository| repository.update_research_role(input))
+        .await
 }
 
 #[tauri::command]
-pub fn set_research_role_archived(
+pub async fn set_research_role_archived(
     research_role_id: String,
     archived: bool,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     state
-        .lock()?
-        .set_research_role_archived(&research_role_id, archived)
+        .run_repository(move |repository| {
+            repository.set_research_role_archived(&research_role_id, archived)
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn reorder_research_roles(
+pub async fn reorder_research_roles(
     project_id: String,
     ordered_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     state
-        .lock()?
-        .reorder_research_roles(&project_id, &ordered_ids)
+        .run_repository(move |repository| {
+            repository.reorder_research_roles(&project_id, &ordered_ids)
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn move_card(
+pub async fn move_card(
     card_id: String,
     category_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.move_card(&card_id, &category_id)
+    state
+        .run_repository(move |repository| repository.move_card(&card_id, &category_id))
+        .await
 }
 
 #[tauri::command]
-pub fn set_card_excluded(
+pub async fn set_card_excluded(
     card_id: String,
     excluded: bool,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.set_card_excluded(&card_id, excluded)
+    state
+        .run_repository(move |repository| repository.set_card_excluded(&card_id, excluded))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_card(card_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_card(&card_id)
+pub async fn delete_card(card_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_card(&card_id))
+        .await
 }
 
 #[tauri::command]
-pub fn create_category(
+pub async fn create_category(
     input: CreateCategoryInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_category(input)
+    state
+        .run_repository(move |repository| repository.create_category(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_category(input: UpdateCategoryInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.update_category(input)
+pub async fn update_category(
+    input: UpdateCategoryInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.update_category(input))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_category(category_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_category(&category_id)
+pub async fn delete_category(category_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_category(&category_id))
+        .await
 }
 
 #[tauri::command]
-pub fn reorder_categories(
+pub async fn reorder_categories(
     project_id: String,
     ordered_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.reorder_categories(&project_id, &ordered_ids)
+    state
+        .run_repository(move |repository| repository.reorder_categories(&project_id, &ordered_ids))
+        .await
 }
 
 #[tauri::command]
-pub fn create_outline_node(
+pub async fn create_outline_node(
     input: CreateOutlineNodeInput,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.create_outline_node(input)
+    state
+        .run_repository(move |repository| repository.create_outline_node(input))
+        .await
 }
 
 #[tauri::command]
-pub fn update_outline_node(
+pub async fn update_outline_node(
     input: UpdateOutlineNodeInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_outline_node(input)
+    state
+        .run_repository(move |repository| repository.update_outline_node(input))
+        .await
 }
 
 #[tauri::command]
-pub fn move_outline_node(input: MoveOutlineNodeInput, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.move_outline_node(input)
+pub async fn move_outline_node(
+    input: MoveOutlineNodeInput,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.move_outline_node(input))
+        .await
 }
 
 #[tauri::command]
-pub fn delete_outline_node(node_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.delete_outline_node(&node_id)
+pub async fn delete_outline_node(node_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.delete_outline_node(&node_id))
+        .await
 }
 
 #[tauri::command]
-pub fn link_card_to_outline(
+pub async fn link_card_to_outline(
     node_id: String,
     card_id: String,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
-    state.lock()?.link_card_to_outline(&node_id, &card_id)
+    state
+        .run_repository(move |repository| repository.link_card_to_outline(&node_id, &card_id))
+        .await
 }
 
 #[tauri::command]
-pub fn remove_outline_link(link_id: String, state: State<'_, AppState>) -> AppResult<()> {
-    state.lock()?.remove_outline_link(&link_id)
+pub async fn remove_outline_link(link_id: String, state: State<'_, AppState>) -> AppResult<()> {
+    state
+        .run_repository(move |repository| repository.remove_outline_link(&link_id))
+        .await
 }
 
 #[tauri::command]
-pub fn update_outline_card_link(
+pub async fn update_outline_card_link(
     input: UpdateOutlineCardLinkInput,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.update_outline_card_link(input)
+    state
+        .run_repository(move |repository| repository.update_outline_card_link(input))
+        .await
 }
 
 #[tauri::command]
-pub fn move_outline_card(
+pub async fn move_outline_card(
     link_id: String,
     direction: i64,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
-    state.lock()?.move_outline_card(&link_id, direction)
+    state
+        .run_repository(move |repository| repository.move_outline_card(&link_id, direction))
+        .await
 }
 
 #[cfg(test)]
@@ -993,6 +1236,21 @@ mod tests {
         assert!(schedule.take_due(launch + Duration::from_secs(30 * 60)));
         assert!(!schedule.take_due(launch + Duration::from_secs(59 * 60 + 59)));
         assert!(schedule.take_due(launch + Duration::from_secs(60 * 60)));
+    }
+
+    #[test]
+    fn failed_backup_retries_after_one_minute_without_a_catch_up_burst() {
+        let launch = Instant::now();
+        let mut schedule = SessionBackupSchedule::default();
+        schedule.configure(30, launch);
+        let due = launch + Duration::from_secs(30 * 60);
+        assert!(schedule.take_due(due));
+        schedule.retry_after_failure(due);
+        assert!(!schedule.take_due(due + Duration::from_secs(59)));
+        assert!(schedule.take_due(due + Duration::from_secs(60)));
+        assert!(!schedule.take_due(due + Duration::from_secs(61)));
+        schedule.configure(0, due);
+        assert!(!schedule.take_due(due + Duration::from_secs(60 * 60)));
     }
 
     #[test]

@@ -15,3 +15,5 @@ coverage/
 .env.local
 .DS_Store
 Thumbs.db
+
+.test-tmp/

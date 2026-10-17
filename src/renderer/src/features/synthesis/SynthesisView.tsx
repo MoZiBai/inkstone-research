@@ -7,6 +7,7 @@ import {
   ChevronsDown,
   ChevronsUp,
   Edit3,
+  GripVertical,
   Layers3,
   Palette,
   Plus,
@@ -29,6 +30,8 @@ import { ContextMenu } from '../../components/ContextMenu'
 import { EmptyState } from '../../components/EmptyState'
 import { ConfirmDialog, Modal } from '../../components/Modal'
 import { api } from '../../lib/api'
+import { usePersistentSet, usePersistentState } from '../../lib/preferences'
+import { CardText } from '../../components/CardText'
 import { filterProjectCards, groupCardsByCategory } from '../../lib/workspaceCollections'
 import type { RunMutation } from '../../types'
 
@@ -55,16 +58,14 @@ export function SynthesisView({
   const [mode, setMode] = useState<'active' | 'excluded'>(initialMode)
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null)
   const [dragOverCategory, setDragOverCategory] = useState<string | null>(null)
-  const [collapsedCategoryIds, setCollapsedCategoryIds] = useState<Set<string>>(
-    () => new Set()
-  )
-  const [expandedCategoryIds, setExpandedCategoryIds] = useState<Set<string>>(
-    () => new Set()
-  )
+  const [collapsedCategoryIds, setCollapsedCategoryIds] = usePersistentSet<string>(`inkstone:synthesis-collapsed:${snapshot.currentProjectId}`)
+  const [expandedCategoryIds, setExpandedCategoryIds] = usePersistentSet<string>(`inkstone:synthesis-expanded:${snapshot.currentProjectId}`)
+  const [cardLimits, setCardLimits] = useState<Record<string, number>>({})
+  const [excludedLimit, setExcludedLimit] = useState(50)
   const [editingCard, setEditingCard] = useState<ProjectCardView | null>(null)
   const [editingCategory, setEditingCategory] = useState<SynthesisCategory | 'new' | null>(null)
   const [showResearchRoleManager, setShowResearchRoleManager] = useState(false)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = usePersistentState(`inkstone:synthesis-query:${snapshot.currentProjectId}`, '')
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(() => new Set())
   const [cardContextMenu, setCardContextMenu] = useState<{
     x: number
@@ -100,9 +101,9 @@ export function SynthesisView({
   const allVisibleSelected = currentVisibleCards.length > 0 && currentVisibleCards.every((card) => selectedCardIds.has(card.id))
 
   useEffect(() => {
-    const availableIds = new Set(snapshot.cards.map((card) => card.id))
+    const availableIds = new Set(currentVisibleCards.map((card) => card.id))
     setSelectedCardIds((current) => new Set([...current].filter((id) => availableIds.has(id))))
-  }, [snapshot.cards])
+  }, [currentVisibleCards])
 
   const toggleCardSelection = (cardId: string): void => {
     setSelectedCardIds((current) => {
@@ -235,7 +236,7 @@ export function SynthesisView({
   }
 
   const boardColumnCount = Math.max(snapshot.categories.length, 1)
-  const boardMinimumWidth = boardColumnCount * 280 + (boardColumnCount - 1) * 12
+  const boardMinimumWidth = snapshot.categories.reduce((total, category) => total + (!deferredQuery && collapsedCategoryIds.has(category.id) ? 170 : 280), 0) + (boardColumnCount - 1) * 12
 
   return (
     <div className="workspace-view synthesis-view">
@@ -247,7 +248,7 @@ export function SynthesisView({
         </div>
         <div className="heading-actions">
           <button className="button secondary" type="button" disabled={currentVisibleCards.length === 0} onClick={toggleVisibleSelection}>
-            {allVisibleSelected ? '取消当前选择' : `选择当前 ${currentVisibleCards.length} 张`}
+            {allVisibleSelected ? '取消筛选结果选择' : `选择全部筛选结果 ${currentVisibleCards.length} 张`}
           </button>
           <label className="search-box synthesis-search-box">
             <Search size={15} />
@@ -278,7 +279,7 @@ export function SynthesisView({
             <Plus size={15} /> 新建分类
           </button>
           <button className="button secondary" type="button" onClick={() => setShowResearchRoleManager(true)}>
-            <SlidersHorizontal size={15} /> 研究作用
+            <SlidersHorizontal size={15} /> 卡片用途
           </button>
         </div>
       </header>
@@ -296,7 +297,7 @@ export function SynthesisView({
           <div
             className="synthesis-board"
             style={{
-              gridTemplateColumns: `repeat(${boardColumnCount}, minmax(280px, 1fr))`,
+              gridTemplateColumns: snapshot.categories.map((category) => !deferredQuery && collapsedCategoryIds.has(category.id) ? '170px' : 'minmax(280px, 1fr)').join(' '),
               minWidth: `${boardMinimumWidth}px`
             }}
           >
@@ -304,9 +305,8 @@ export function SynthesisView({
               const categoryCards = cardsByCategory.get(category.id) ?? []
               const categoryCollapsed = !deferredQuery && collapsedCategoryIds.has(category.id)
               const categoryExpanded = Boolean(deferredQuery) || expandedCategoryIds.has(category.id)
-              const visibleCategoryCards = categoryExpanded
-                ? categoryCards
-                : categoryCards.slice(0, collapsedCardPreviewCount)
+              const focusIndex = focusCardId ? categoryCards.findIndex((card) => card.id === focusCardId) : -1
+              const visibleCategoryCards = categoryCards.slice(0, categoryExpanded ? Math.max(cardLimits[category.id] ?? 50, focusIndex + 1) : collapsedCardPreviewCount)
               const hiddenCardCount = categoryCards.length - visibleCategoryCards.length
               return (
                 <section
@@ -390,8 +390,8 @@ export function SynthesisView({
                         className={`synthesis-card ${selectedCardIds.has(card.id) ? 'selected' : ''} ${draggedCardId === card.id ? 'dragging' : ''}`}
                         key={card.id}
                         data-synthesis-card={card.id}
-                        draggable
                         onDragStart={(event) => {
+                          if (!(event.target instanceof Element) || !event.target.closest('.synthesis-drag-handle')) { event.preventDefault(); return }
                           setDraggedCardId(card.id)
                           event.dataTransfer.effectAllowed = 'move'
                           event.dataTransfer.setData(synthesisCardTransferType, card.id)
@@ -415,20 +415,13 @@ export function SynthesisView({
                             aria-label={`选择卡片：${card.displayText.slice(0, 40)}`}
                           />
                         </label>
+                        <button className="synthesis-drag-handle icon-button" type="button" draggable aria-label="拖动卡片到其他分类" title="拖动分类，也可使用卡片下方的分类选择"><GripVertical size={14} /></button>
                         <div className="synthesis-card-source">
-                          <span>{card.documentAuthors || '未知作者'}</span>
+                          <span title={card.documentTitle}>{card.documentTitle} · {card.documentAuthors || '未知作者'}</span>
                           <span>{card.printPage ? `印刷 ${card.printPage} · ` : ''}PDF {card.pdfPage ?? '—'}</span>
                         </div>
-                        {card.comment ? (
-                          <div className="synthesis-card-comment">
-                            <span>我的笔记</span>
-                            <p>{card.comment}</p>
-                          </div>
-                        ) : null}
-                        <div className="synthesis-card-evidence">
-                          <span>原文摘录</span>
-                          <blockquote>{card.displayText}</blockquote>
-                        </div>
+                        <CardText card={card} />
+                        {card.tags.length ? <div className="tag-list">{card.tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
                         <div className="card-meta-row">
                           <div className="research-role-pills">
                             {card.researchRoles.length > 0 ? card.researchRoles.map((role) => (
@@ -470,10 +463,11 @@ export function SynthesisView({
                             )
                           }
                         >
-                          <ArchiveX size={13} /> 从二次整理剔除（不删除）
+                          <ArchiveX size={13} /> 剔除（卡片保留）
                         </button>
                       </article>
                     ))}
+                    {hiddenCardCount > 0 && categoryExpanded ? <button className="category-card-overflow" type="button" onClick={() => setCardLimits((limits) => ({ ...limits, [category.id]: (limits[category.id] ?? 50) + 50 }))}>再显示 {Math.min(50, hiddenCardCount)} 张 · 剩余 {hiddenCardCount} 张</button> : null}
                     {!deferredQuery && categoryCards.length > collapsedCardPreviewCount ? (
                       <button
                         className="category-card-overflow"
@@ -486,7 +480,7 @@ export function SynthesisView({
                           </>
                         ) : (
                           <>
-                            <ChevronsDown size={15} /> 展开其余 {hiddenCardCount} 张
+                            <ChevronsDown size={15} /> 展开更多（共 {categoryCards.length} 张）
                           </>
                         )}
                       </button>
@@ -506,7 +500,8 @@ export function SynthesisView({
         </div>
       ) : (
         <div className="excluded-list">
-          {visibleExcludedCards.map((card) => {
+          {visibleExcludedCards.length > excludedLimit ? <button className="button ghost" type="button" onClick={() => setExcludedLimit((count) => count + 50)}>再显示 50 张已剔除卡片</button> : null}
+          {visibleExcludedCards.slice(0, Math.max(excludedLimit, focusCardId ? visibleExcludedCards.findIndex((card) => card.id === focusCardId) + 1 : 0)).map((card) => {
             const previousCategory = card.categoryId ? categoryById.get(card.categoryId) : undefined
             return (
               <article
@@ -619,6 +614,7 @@ export function SynthesisView({
         <CardEditDialog
           card={editingCard}
           researchRoles={snapshot.researchRoles}
+          availableTags={[...new Set(snapshot.cards.flatMap((card) => card.tags))]}
           outlineUsages={snapshot.outlineLinks
             .filter((link) => link.projectCardId === editingCard.id)
             .map((link) => ({
@@ -628,7 +624,7 @@ export function SynthesisView({
             }))}
           onSave={saveCard}
           onClose={() => setEditingCard(null)}
-          onOpenSource={() => onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson)}
+          onOpenSource={() => { setEditingCard(null); onOpenSource(editingCard.documentId, editingCard.pdfPage, editingCard.locatorJson) }}
         />
       ) : null}
       {editingCategory ? (
@@ -688,11 +684,11 @@ function ResearchRoleManager({
     const succeeded = editing === 'new'
       ? await runMutation(
           () => api.createResearchRole({ projectId, name, color }),
-          '研究作用已创建。'
+          '卡片用途已创建。'
         )
       : await runMutation(
           () => api.updateResearchRole({ researchRoleId: editing.id, name, color }),
-          '研究作用已更新。'
+          '卡片用途已更新。'
         )
     if (succeeded) setEditing(null)
   }
@@ -703,14 +699,14 @@ function ResearchRoleManager({
     const next = current + direction
     if (current < 0 || next < 0 || next >= ids.length) return
     ;[ids[current], ids[next]] = [ids[next] as string, ids[current] as string]
-    await runMutation(() => api.reorderResearchRoles(projectId, ids), '研究作用顺序已保存。')
+    await runMutation(() => api.reorderResearchRoles(projectId, ids), '卡片用途顺序已保存。')
   }
 
   return (
     <>
       <Modal
-        title="管理研究作用"
-        subtitle="研究作用属于当前项目；一张卡片可以同时选择多个。归档不会移除已有卡片关联。"
+        title="管理卡片用途"
+        subtitle="卡片用途属于当前项目；一张卡片可以同时选择多个。归档不会移除已有卡片关联。"
         onClose={onClose}
         width="large"
         hasUnsavedChanges={editorHasUnsavedChanges}
@@ -718,7 +714,7 @@ function ResearchRoleManager({
         <div className="research-role-manager">
         <div className="research-role-manager-toolbar">
           <button className="button secondary" type="button" disabled={Boolean(editing)} onClick={() => beginEditing('new')}>
-            <Plus size={14} /> 新建研究作用
+            <Plus size={14} /> 新建卡片用途
           </button>
         </div>
         {editing ? (
@@ -766,7 +762,7 @@ function ResearchRoleManager({
                 type="button"
                 onClick={() => void runMutation(
                   () => api.setResearchRoleArchived(role.id, !role.isArchived),
-                  role.isArchived ? '研究作用已重新启用。' : '研究作用已归档，已有卡片关联继续保留。'
+                  role.isArchived ? '卡片用途已重新启用。' : '卡片用途已归档，已有卡片关联继续保留。'
                 )}
               >
                 {role.isArchived ? <RotateCcw size={13} /> : <ArchiveX size={13} />}
@@ -782,7 +778,7 @@ function ResearchRoleManager({
       </Modal>
       {confirmingEditorDiscard ? (
         <ConfirmDialog
-          title="放弃研究作用的修改？"
+          title="放弃卡片用途的修改？"
           description="名称或颜色尚未保存。可以继续编辑，或放弃这次修改。"
           confirmLabel="放弃修改"
           dangerous

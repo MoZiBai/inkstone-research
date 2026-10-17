@@ -1,17 +1,27 @@
 use std::time::Duration;
 
+use crate::error::{AppError, AppResult};
 use rusqlite::{Connection, Result};
 
 pub const SCHEMA_VERSION: i64 = 12;
 
-pub fn migrate_database(connection: &mut Connection) -> Result<()> {
+pub fn migrate_database(connection: &mut Connection) -> AppResult<()> {
+    let current_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current_version > SCHEMA_VERSION {
+        return Err(AppError::Validation(
+            "该资料库由更新版本的砚台创建，请升级软件后再打开。".into(),
+        ));
+    }
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.busy_timeout(Duration::from_secs(5))?;
 
-    let current_version: i64 =
-        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // Commit schema changes and the version marker together so failed upgrades
+    // leave the original schema intact and can be retried on the next launch.
+    let transaction = connection.transaction()?;
+    let connection = &transaction;
 
     if current_version < 1 {
         connection.execute_batch(
@@ -411,6 +421,7 @@ pub fn migrate_database(connection: &mut Connection) -> Result<()> {
         )?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -641,6 +652,59 @@ pub fn seed_database(connection: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_upgrade_rolls_back_schema_and_version_and_can_retry() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE reading_notes (id TEXT PRIMARY KEY); PRAGMA user_version = 0;",
+            )
+            .unwrap();
+        assert!(migrate_database(&mut connection).is_err());
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        let projects: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'projects'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projects, 0);
+        connection
+            .execute_batch("DROP TABLE reading_notes;")
+            .unwrap();
+        migrate_database(&mut connection).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn future_database_version_is_rejected_without_schema_changes() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let error = migrate_database(&mut connection).unwrap_err();
+        assert!(error.to_string().contains("升级软件"));
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION + 1);
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+    }
 
     #[test]
     fn version_six_roles_are_migrated_to_project_scoped_relations() {

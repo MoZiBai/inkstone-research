@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ProjectCardView, ResearchRole, UpdateCardInput } from '@shared/types'
 import { Modal } from './Modal'
+import { TagInput } from './TagInput'
+import { parseTags } from '../lib/tags'
 
 interface CardEditDialogProps {
   card: ProjectCardView
   researchRoles: ResearchRole[]
+  availableTags?: string[]
   outlineUsages?: Array<{ linkId: string; nodeTitle: string; note: string }>
   onSave: (input: UpdateCardInput) => Promise<void>
   onClose: () => void
@@ -20,6 +23,7 @@ const originLabels: Record<ProjectCardView['originKind'], string> = {
 export function CardEditDialog({
   card,
   researchRoles,
+  availableTags = [],
   outlineUsages = [],
   onSave,
   onClose,
@@ -61,10 +65,7 @@ export function CardEditDialog({
       printPageOverride,
       comment,
       researchRoleIds: Array.from(selectedRoleIds),
-      tags: tags
-        .split(/[、,，]/)
-        .map((tag) => tag.trim())
-        .filter(Boolean)
+      tags: parseTags(tags)
     })
   }
 
@@ -79,7 +80,7 @@ export function CardEditDialog({
 
   return (
     <Modal
-      title="研究卡片详情"
+      title="阅读卡片详情"
       subtitle={`${card.documentAuthors || '未知作者'} · ${card.documentTitle}`}
       onClose={onClose}
       width="large"
@@ -90,6 +91,15 @@ export function CardEditDialog({
           <span className={`soft-pill origin-${card.originKind}`}>{originLabels[card.originKind]}</span>
           <span>PDF 第 {card.pdfPage ?? '—'} 页</span>
         </div>
+        <label className="field">
+          <span>我的笔记</span>
+          <textarea
+            rows={5}
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="记录这段材料为什么重要、如何使用或有哪些疑问……"
+          />
+        </label>
         <label className="field excerpt-text-editor">
           <span>卡片摘录文字 <small>修改不会改变原始选区和 PDF 定位</small></span>
           <textarea
@@ -103,7 +113,7 @@ export function CardEditDialog({
         <div className="form-grid two-columns">
           <label className="field">
             <span>标签（使用顿号或逗号分隔）</span>
-            <input value={tags} onChange={(event) => setTags(event.target.value)} />
+            <TagInput value={tags} onChange={setTags} suggestions={availableTags} />
           </label>
           <label className="field">
             <span>单卡印刷页覆盖 <small>留空则使用文献映射</small></span>
@@ -122,7 +132,7 @@ export function CardEditDialog({
           </label>
         </div>
         <fieldset className="research-role-picker">
-          <legend>研究作用（可多选）</legend>
+          <legend>卡片用途（可多选）</legend>
           {visibleRoles.length > 0 ? (
             <div className="research-role-options">
               {visibleRoles.map((role) => (
@@ -139,18 +149,9 @@ export function CardEditDialog({
               ))}
             </div>
           ) : (
-            <p className="field-hint">尚未建立可用的研究作用；可以稍后在二次整理中设置。</p>
+            <p className="field-hint">尚未建立可用的卡片用途；可以稍后在二次整理中设置。</p>
           )}
         </fieldset>
-        <label className="field">
-          <span>即时笔记</span>
-          <textarea
-            rows={5}
-            value={comment}
-            onChange={(event) => setComment(event.target.value)}
-            placeholder="记录这段材料为什么重要、如何使用或有哪些疑问……"
-          />
-        </label>
         <details className="card-source-details">
           <summary>原始文字、上下文与来源信息</summary>
           <div className="original-selection-details">
@@ -183,7 +184,7 @@ export function CardEditDialog({
               ))}
             </ul>
           ) : (
-            <p>这张卡片尚未关联到论文提纲。</p>
+            <p>这张卡片尚未关联到写作提纲。</p>
           )}
         </section>
         <div className="modal-actions">

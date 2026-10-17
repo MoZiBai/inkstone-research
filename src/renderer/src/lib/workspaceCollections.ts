@@ -77,6 +77,23 @@ export function buildOutlineWorkspaceIndexes(
   const linkedCardIdsByNodeId = new Map<string, Set<string>>()
   const usageTitlesByCardId = new Map<string, string[]>()
 
+  const pathByNodeId = new Map<string, string>()
+  const nodePath = (nodeId: string): string => {
+    const cached = pathByNodeId.get(nodeId)
+    if (cached) return cached
+    const visited = new Set<string>()
+    const parts: string[] = []
+    let current = nodesById.get(nodeId)
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id)
+      parts.unshift(current.title)
+      current = current.parentId ? nodesById.get(current.parentId) : undefined
+    }
+    const path = parts.join(' / ')
+    pathByNodeId.set(nodeId, path)
+    return path
+  }
+
   for (const link of links) {
     const nodeLinks = linksByNodeId.get(link.outlineNodeId) ?? []
     nodeLinks.push(link)
@@ -86,7 +103,7 @@ export function buildOutlineWorkspaceIndexes(
     linkedIds.add(link.projectCardId)
     linkedCardIdsByNodeId.set(link.outlineNodeId, linkedIds)
 
-    const nodeTitle = nodesById.get(link.outlineNodeId)?.title
+    const nodeTitle = nodePath(link.outlineNodeId)
     if (nodeTitle) {
       const titles = usageTitlesByCardId.get(link.projectCardId) ?? []
       titles.push(nodeTitle)

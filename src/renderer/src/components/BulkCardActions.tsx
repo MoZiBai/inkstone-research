@@ -1,7 +1,10 @@
 import { ArchiveX, CheckSquare2, FolderInput, RotateCcw, Tags, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BatchUpdateCardsInput, ProjectCardView, WorkspaceSnapshot } from '@shared/types'
 import { api } from '../lib/api'
+import { TagInput } from './TagInput'
+import { parseTags } from '../lib/tags'
+export { parseTags } from '../lib/tags'
 import type { RunMutation } from '../types'
 
 export type BulkCardContext = 'library' | 'synthesis-active' | 'synthesis-excluded'
@@ -22,11 +25,28 @@ export function BulkCardActions({
   onClear
 }: BulkCardActionsProps): React.JSX.Element | null {
   const [tagMode, setTagMode] = useState<'add' | 'remove' | null>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const [tagDraft, setTagDraft] = useState('')
   const [removeTags, setRemoveTags] = useState<Set<string>>(() => new Set())
   const [categoryId, setCategoryId] = useState(
     snapshot.categories.find((category) => category.isDefault)?.id ?? snapshot.categories[0]?.id ?? ''
   )
+  const validCategoryId = snapshot.categories.some((category) => category.id === categoryId)
+    ? categoryId
+    : snapshot.categories.find((category) => category.isDefault)?.id ?? snapshot.categories[0]?.id ?? ''
+  useEffect(() => {
+    setCategoryId(snapshot.categories.find((category) => category.isDefault)?.id ?? snapshot.categories[0]?.id ?? '')
+    setTagMode(null)
+    setTagDraft('')
+    setRemoveTags(new Set())
+  }, [snapshot.currentProjectId])
+  useEffect(() => {
+    if (selectedIds.size === 0) {
+      setTagMode(null)
+      setTagDraft('')
+      setRemoveTags(new Set())
+    }
+  }, [selectedIds.size])
   const selectedCards = useMemo(
     () => snapshot.cards.filter((card) => selectedIds.has(card.id)),
     [selectedIds, snapshot.cards]
@@ -39,6 +59,20 @@ export function BulkCardActions({
     [snapshot.cards]
   )
   const count = selectedCards.length
+  useEffect(() => {
+    if (!tagMode) return
+    const close = (): void => { setTagMode(null); setTagDraft(''); setRemoveTags(new Set()) }
+    const outside = (event: PointerEvent): void => {
+      if (event.target instanceof Element && event.target.closest('[aria-label="关闭砚台"], [role="dialog"]')) return
+      if (event.target instanceof Node && !popoverRef.current?.contains(event.target)) close()
+    }
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !document.querySelector('[aria-modal="true"]')) { event.stopPropagation(); close() }
+    }
+    window.addEventListener('pointerdown', outside, true)
+    window.addEventListener('keydown', escape)
+    return () => { window.removeEventListener('pointerdown', outside, true); window.removeEventListener('keydown', escape) }
+  }, [tagMode])
   if (count === 0 || !snapshot.currentProjectId) return null
 
   const runBatch = async (
@@ -96,27 +130,23 @@ export function BulkCardActions({
   const showExclude = context !== 'synthesis-excluded' && activeCards.length > 0
   const showRestore = context !== 'synthesis-active' && excludedCards.length > 0
   const parsedDraftTags = parseTags(tagDraft)
-  const currentTagQuery = tagDraft.split(/[\n,，]/).at(-1)?.trim().toLocaleLowerCase() ?? ''
-  const addSuggestions = allProjectTags
-    .filter((tag) => !parsedDraftTags.includes(tag))
-    .filter((tag) => !currentTagQuery || tag.toLocaleLowerCase().includes(currentTagQuery))
-    .slice(0, 8)
+
 
   return (
-    <div className="bulk-card-actions" role="region" aria-label={`批量操作 ${count} 张卡片`}>
+    <div ref={popoverRef} className="bulk-card-actions" role="region" aria-label={`批量操作 ${count} 张卡片`}>
       <span className="bulk-selection-count"><CheckSquare2 size={16} /> 已选择 <strong>{count}</strong> 张</span>
       <button type="button" onClick={() => openTags('add')}><Tags size={14} /> 添加标签</button>
       <button type="button" disabled={tagOccurrences.length === 0} onClick={() => openTags('remove')}><Tags size={14} /> 移除已有标签</button>
       {showMove ? (
         <div className="bulk-category-action">
-          <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} aria-label="批量移动到整理分类">
+          <select value={validCategoryId} onChange={(event) => setCategoryId(event.target.value)} aria-label="批量移动到整理分类">
             {snapshot.categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
           </select>
           <button
             type="button"
-            disabled={!categoryId}
+            disabled={!validCategoryId}
             onClick={() => void runBatch(
-              { categoryId },
+              { categoryId: validCategoryId },
               `已将 ${activeCards.length} 张整理中卡片移动到所选分类。`,
               activeCards
             )}
@@ -153,24 +183,12 @@ export function BulkCardActions({
       <button className="bulk-clear-selection" type="button" onClick={onClear} aria-label="清除卡片选择"><X size={14} /></button>
 
       {tagMode === 'add' ? (
-        <form className="bulk-tag-popover" onSubmit={(event) => void submitAddedTags(event)}>
+        <form data-unsaved={tagDraft.trim() ? 'true' : undefined} className="bulk-tag-popover" onSubmit={(event) => void submitAddedTags(event)}>
           <div>
             <strong>添加标签</strong>
             <small>以逗号分隔，将应用到所选 {count} 张卡片</small>
           </div>
-          <input
-            autoFocus
-            value={tagDraft}
-            onChange={(event) => setTagDraft(event.target.value)}
-            placeholder="输入新标签或选择已有标签"
-          />
-          {addSuggestions.length > 0 ? (
-            <div className="bulk-tag-suggestions">
-              {addSuggestions.map((tag) => (
-                <button key={tag} type="button" onClick={() => setTagDraft((current) => `${current.trim().replace(/[,，]$/, '')}${current.trim() ? '，' : ''}${tag}，`)}>{tag}</button>
-              ))}
-            </div>
-          ) : null}
+          <TagInput value={tagDraft} onChange={setTagDraft} suggestions={allProjectTags} />
           <div className="bulk-tag-popover-actions">
             <button type="button" onClick={closeTags}>取消</button>
             <button className="primary" type="submit" disabled={parsedDraftTags.length === 0}>添加 {parsedDraftTags.length || ''}</button>
@@ -179,7 +197,7 @@ export function BulkCardActions({
       ) : null}
 
       {tagMode === 'remove' ? (
-        <div className="bulk-tag-popover remove-tags">
+        <div data-unsaved={removeTags.size > 0 ? 'true' : undefined} className="bulk-tag-popover remove-tags">
           <div>
             <strong>移除已有标签</strong>
             <small>勾选要移除的标签，不需要重新输入</small>
@@ -220,8 +238,4 @@ export function collectTagOccurrences(cards: ProjectCardView[]): Array<{ tag: st
   return [...occurrences.entries()]
     .map(([tag, count]) => ({ tag, count }))
     .sort((first, second) => second.count - first.count || first.tag.localeCompare(second.tag, 'zh-CN'))
-}
-
-export function parseTags(value: string): string[] {
-  return Array.from(new Set(value.split(/[\n,，]/).map((tag) => tag.trim()).filter(Boolean)))
 }

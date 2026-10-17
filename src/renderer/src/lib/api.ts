@@ -1,4 +1,5 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke as tauriInvoke } from '@tauri-apps/api/core'
+import { recordWorkspaceCommand } from './workspaceRefresh'
 import type {
   CreateCategoryInput,
   CreateCardFromSelectionInput,
@@ -11,6 +12,7 @@ import type {
   CreateResearchRoleInput,
   BackupCleanupResult,
   BackupManagerState,
+  BackupRuntimeStatus,
   BatchUpdateCardsInput,
   DatabaseImportResult,
   DatabaseImportPreview,
@@ -32,12 +34,19 @@ import type {
   UpdateReadingNoteInput,
   UpdateResearchRoleInput,
   UpdateBackupSettingsInput,
-  WorkspaceSnapshot
+  WorkspaceSnapshot,
+  WorkspaceSection
 } from '@shared/types'
 
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const result = await tauriInvoke<T>(command, args)
+  recordWorkspaceCommand(command)
+  return result
+}
+
 export const api: InkstoneApi = {
-  getWorkspace: (projectId?: string) =>
-    invoke<WorkspaceSnapshot>('get_workspace', { projectId }),
+  getWorkspace: (projectId?: string, sections?: WorkspaceSection[]) =>
+    invoke<WorkspaceSnapshot>('get_workspace', { projectId, sections }),
   createProject: (input: CreateProjectInput) =>
     invoke<string>('create_project', { input }),
   updateProject: (input: UpdateProjectInput) =>
@@ -74,6 +83,7 @@ export const api: InkstoneApi = {
     invoke<DatabaseImportResult>('import_project_database', { sourcePath }),
   previewDatabaseImport: (sourcePath: string, projectOnly: boolean) =>
     invoke<DatabaseImportPreview>('preview_database_import', { sourcePath, projectOnly }),
+  getBackupRuntime: () => invoke<BackupRuntimeStatus>('get_backup_runtime'),
   getBackupManager: () => invoke<BackupManagerState>('get_backup_manager'),
   createBackupSnapshot: () => invoke<BackupManagerState>('create_backup_snapshot'),
   hideToTray: () => invoke<void>('hide_to_tray'),

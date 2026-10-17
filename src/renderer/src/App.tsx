@@ -8,9 +8,7 @@ import {
   DatabaseBackup,
   Download,
   FileStack,
-  FolderOpen,
   FolderKanban,
-  HardDrive,
   Library,
   LoaderCircle,
   CircleX,
@@ -20,7 +18,6 @@ import {
   PanelLeftOpen,
   PencilLine,
   Plus,
-  RefreshCw,
   Search,
   ScrollText,
   Scissors,
@@ -29,28 +26,35 @@ import {
   Sparkles,
   Trash2,
   Type,
-  TextSelect,
-  Upload
+  TextSelect
 } from 'lucide-react'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
-import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BackupManagerState,
   BackupRecord,
+  BackupRuntimeStatus,
   DatabaseImportPreview,
   DatabaseImportResult,
   ProjectSummary,
-  WorkspaceSnapshot
+  WorkspaceSnapshot,
+  WorkspaceSection
 } from '@shared/types'
 import { ConfirmDialog, Modal } from './components/Modal'
 import { ContextMenu } from './components/ContextMenu'
+import { CloseApplicationDialog } from './components/CloseApplicationDialog'
+import { CardEditDialog } from './components/CardEditDialog'
 import { LibraryView } from './features/library/LibraryView'
 import { OutlineView } from './features/outline/OutlineView'
 import { ReadingView, type ReadingFocusRequest } from './features/reading/ReadingView'
 import { parsePdfLocator } from './features/reading/pdfLocator'
 import { SynthesisView } from './features/synthesis/SynthesisView'
 import { api } from './lib/api'
+import { DatabaseTransferDialog } from './features/backup/DatabaseTransferDialog'
+import { formatBytes, formatDateTime, fileName } from './lib/formatting'
+import { consumeWorkspaceChanges, mergeWorkspace } from './lib/workspaceRefresh'
+import { readPreference, writePreference, usePersistentState } from './lib/preferences'
 import {
   filterAndSortProjects,
   searchCurrentProject,
@@ -73,12 +77,12 @@ const tabs: Array<{
   { id: 'reading', label: '阅读台', icon: BookOpen },
   { id: 'library', label: '卡片库', icon: Library },
   { id: 'synthesis', label: '二次整理', icon: Boxes },
-  { id: 'outline', label: '论文提纲', icon: ScrollText }
+  { id: 'outline', label: '写作提纲', icon: ScrollText }
 ]
 
 export default function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null)
-  const [activeView, setActiveView] = useState<ViewId>('reading')
+  const [activeView, setActiveView] = usePersistentState<ViewId>('inkstone:active-view', 'reading')
   const [initialLoading, setInitialLoading] = useState(true)
   const [mutating, setMutating] = useState(false)
   const [fatalError, setFatalError] = useState<string | null>(null)
@@ -89,10 +93,12 @@ export default function App(): React.JSX.Element {
   const [showDatabaseDialog, setShowDatabaseDialog] = useState(false)
   const [databaseBusy, setDatabaseBusy] = useState(false)
   const [backupManager, setBackupManager] = useState<BackupManagerState | null>(null)
+  const [backupRuntime, setBackupRuntime] = useState<BackupRuntimeStatus | null>(null)
   const [backupManagerError, setBackupManagerError] = useState<string | null>(null)
   const [backupManagerBusy, setBackupManagerBusy] = useState(false)
   const [showCloseChoice, setShowCloseChoice] = useState(false)
-  const [closeChoiceBusy, setCloseChoiceBusy] = useState(false)
+  const mutationLock = useRef(false)
+  const refreshSequence = useRef(0)
   const [deletingBackup, setDeletingBackup] = useState<BackupRecord | null>(null)
   const [pendingDatabaseImport, setPendingDatabaseImport] = useState<{
     path: string
@@ -106,10 +112,13 @@ export default function App(): React.JSX.Element {
   const [readingDocumentId, setReadingDocumentId] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
   const [fontSize, setFontSize] = useState<FontSize>(loadFontSize)
-  const [projectQuery, setProjectQuery] = useState('')
-  const [projectFilter, setProjectFilter] = useState<ProjectFilter>('all')
-  const [projectSort, setProjectSort] = useState<ProjectSort>('updated')
+  const [projectQuery, setProjectQuery] = usePersistentState('inkstone:project-query', '')
+  const [projectFilter, setProjectFilter] = usePersistentState<ProjectFilter>('inkstone:project-filter', 'all')
+  const [projectSort, setProjectSort] = usePersistentState<ProjectSort>('inkstone:project-sort', 'updated')
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
+  const [projectSearchFocused, setProjectSearchFocused] = useState(false)
+  const [projectSearchLimit, setProjectSearchLimit] = useState(8)
+  const [searchCardId, setSearchCardId] = useState<string | null>(null)
   const [appContextMenu, setAppContextMenu] = useState<{
     x: number
     y: number
@@ -126,15 +135,21 @@ export default function App(): React.JSX.Element {
     }, kind === 'error' ? 6500 : kind === 'warning' ? 5000 : 3200)
   }, [])
 
-  const loadWorkspace = useCallback(async (projectId?: string): Promise<void> => {
+  const loadWorkspace = useCallback(async (projectId?: string, sections?: WorkspaceSection[]): Promise<boolean> => {
+    const sequence = ++refreshSequence.current
     try {
-      const next = await api.getWorkspace(projectId)
-      setSnapshot(next)
+      const next = await api.getWorkspace(projectId, sections)
+      if (sequence !== refreshSequence.current) return false
+      setSnapshot((previous) => mergeWorkspace(previous, next, sections))
+      if (next.currentProjectId) writePreference('inkstone:last-project', next.currentProjectId)
       setFatalError(null)
+      return true
     } catch (error) {
+      if (sequence !== refreshSequence.current) return false
       setFatalError(normalizeError(error))
+      return false
     } finally {
-      setInitialLoading(false)
+      if (sequence === refreshSequence.current) setInitialLoading(false)
     }
   }, [])
 
@@ -151,7 +166,7 @@ export default function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    void loadWorkspace()
+    void loadWorkspace(readPreference('inkstone:last-project', '') || undefined)
   }, [loadWorkspace])
 
   useEffect(() => {
@@ -184,23 +199,44 @@ export default function App(): React.JSX.Element {
     }
   }, [fontSize])
 
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void api.getBackupRuntime().then((status) => { if (!disposed) setBackupRuntime(status) }).catch(() => undefined)
+    void listen<BackupRuntimeStatus>('backup-status-changed', ({ payload }) => {
+      setBackupRuntime(payload)
+      if (payload.lastError) notify(`自动备份未完成：${payload.lastError}`, 'error')
+      if (showDatabaseDialog) void loadBackupManager()
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop })
+    const timer = showDatabaseDialog ? window.setInterval(() => {
+      void api.getBackupRuntime().then((status) => { if (!disposed) setBackupRuntime(status) }).catch(() => undefined)
+    }, 10000) : undefined
+    return () => { disposed = true; unlisten?.(); window.clearInterval(timer) }
+  }, [showDatabaseDialog, loadBackupManager, notify])
+
   const runMutation: RunMutation = useCallback(
     async (action, successMessage, projectId) => {
-      if (mutating) return false
+      if (mutationLock.current) {
+        notify('上一项操作正在完成，请稍候。', 'warning')
+        return false
+      }
+      mutationLock.current = true
       setMutating(true)
       try {
         await action()
-        await loadWorkspace(projectId ?? snapshot?.currentProjectId ?? undefined)
-        notify(successMessage)
+        const refreshed = await loadWorkspace(projectId ?? snapshot?.currentProjectId ?? undefined, consumeWorkspaceChanges())
+        if (refreshed) notify(successMessage)
+        else notify('修改已保存，但界面刷新失败。请重试刷新，无需重复提交。', 'warning')
         return true
       } catch (error) {
         notify(normalizeError(error), 'error')
         return false
       } finally {
+        mutationLock.current = false
         setMutating(false)
       }
     },
-    [loadWorkspace, mutating, notify, snapshot?.currentProjectId]
+    [loadWorkspace, notify, snapshot?.currentProjectId]
   )
 
   const currentProject = useMemo(
@@ -213,33 +249,46 @@ export default function App(): React.JSX.Element {
   )
   const projectSearchResults = useMemo(
     () => snapshot
-      ? searchCurrentProject(snapshot, deferredProjectSearchQuery)
-      : { documents: [], cards: [] },
-    [deferredProjectSearchQuery, snapshot]
+      ? searchCurrentProject(snapshot, deferredProjectSearchQuery, projectSearchLimit)
+      : { documents: [], cards: [], documentTotal: 0, cardTotal: 0 },
+    [deferredProjectSearchQuery, snapshot, projectSearchLimit]
   )
-  const projectSearchOpen = Boolean(projectSearchQuery.trim())
+  const projectSearchOpen = projectSearchFocused && Boolean(projectSearchQuery.trim())
+  const searchCard = snapshot?.cards.find((card) => card.id === searchCardId)
+  useEffect(() => {
+    setProjectSearchLimit(8)
+  }, [projectSearchQuery])
+  useEffect(() => {
+    setProjectSearchQuery('')
+    setSearchCardId(null)
+  }, [snapshot?.currentProjectId])
 
   const switchProject = async (projectId: string): Promise<void> => {
-    if (projectId === snapshot?.currentProjectId || mutating) return
+    if (projectId === snapshot?.currentProjectId || mutationLock.current) return
+    mutationLock.current = true
     setMutating(true)
-    setReadingRequest(null)
-    setReadingDocumentId(null)
-    await loadWorkspace(projectId)
+    if (await loadWorkspace(projectId)) {
+      setReadingRequest(null)
+      setReadingDocumentId(null)
+    }
+    mutationLock.current = false
     setMutating(false)
   }
 
-  const locateSynthesis = (cardId: string, excluded: boolean): void => {
+  const locateSynthesis = useCallback((cardId: string, excluded: boolean): void => {
     setFocusCardId(cardId)
     setSynthesisMode(excluded ? 'excluded' : 'active')
     setActiveView('synthesis')
-  }
+  }, [setActiveView])
 
-  const openSource = (documentId: string, page: number | null, locatorJson: string): void => {
+  const openSource = useCallback((documentId: string, page: number | null, locatorJson: string): void => {
     const token = Date.now() + Math.floor(Math.random() * 1000)
     const locator = page ? parsePdfLocator(locatorJson, page) : null
     setReadingRequest({ token, documentId, page, locator })
     setActiveView('reading')
-  }
+  }, [setActiveView])
+  const clearReadingRequest = useCallback(() => setReadingRequest(null), [])
+  const clearFocusCard = useCallback(() => setFocusCardId(null), [])
 
   const exportDatabase = async (): Promise<void> => {
     try {
@@ -281,13 +330,15 @@ export default function App(): React.JSX.Element {
   }
 
   const removeSelectedProject = async (): Promise<void> => {
-    if (!removingProject || mutating) return
+    if (!removingProject || mutationLock.current) return
+    mutationLock.current = true
     const nextProjectId = snapshot?.projects.find(
       (project) => project.id !== removingProject.id
     )?.id
     setMutating(true)
     try {
       await api.removeProject(removingProject.id)
+      consumeWorkspaceChanges()
       await loadWorkspace(nextProjectId)
       setRemovingProject(null)
       setReadingRequest(null)
@@ -297,6 +348,7 @@ export default function App(): React.JSX.Element {
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
+      mutationLock.current = false
       setMutating(false)
     }
   }
@@ -310,14 +362,21 @@ export default function App(): React.JSX.Element {
         filters: [{ name: mode === 'project' ? '砚台项目数据库' : '砚台数据库备份', extensions: ['db'] }]
       })
       if (typeof source !== 'string') return
-      setDatabaseBusy(true)
-      const preview = await api.previewDatabaseImport(source, mode === 'project')
-      setPendingDatabaseImport({ path: source, mode, preview })
+      await previewBackupImport(source, mode)
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
       setDatabaseBusy(false)
     }
+  }
+
+  const previewBackupImport = async (path: string, mode: 'database' | 'project'): Promise<void> => {
+    setDatabaseBusy(true)
+    try {
+      const preview = await api.previewDatabaseImport(path, mode === 'project')
+      setPendingDatabaseImport({ path, mode, preview })
+    } catch (error) { notify(normalizeError(error), 'error') }
+    finally { setDatabaseBusy(false) }
   }
 
   const importDatabase = async (): Promise<void> => {
@@ -405,7 +464,7 @@ export default function App(): React.JSX.Element {
     try {
       setBackupManager(await api.createBackupSnapshot())
       setBackupManagerError(null)
-      notify('当前研究数据库已主动备份。')
+      notify('当前资料库已备份。')
     } catch (error) {
       notify(normalizeError(error), 'error')
     } finally {
@@ -443,17 +502,27 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  const closeDialog = showCloseChoice ? (
+    <CloseApplicationDialog
+      busy={mutating || databaseBusy || backupManagerBusy || Boolean(backupRuntime?.running)}
+      onHide={api.hideToTray}
+      onExit={api.exitApplication}
+      onClose={() => setShowCloseChoice(false)}
+    />
+  ) : null
+
   if (initialLoading) {
     return (
       <div className="app-loading">
         <span className="brand-seal">砚</span>
         <LoaderCircle className="spin" size={20} />
         <p>正在打开本地资料库……</p>
+        {closeDialog}
       </div>
     )
   }
 
-  if (!snapshot || fatalError) {
+  if (!snapshot) {
     return (
       <div className="app-loading error-screen">
         <span className="brand-seal">砚</span>
@@ -462,6 +531,7 @@ export default function App(): React.JSX.Element {
         <button className="button primary" type="button" onClick={() => void loadWorkspace()}>
           重试
         </button>
+        {closeDialog}
       </div>
     )
   }
@@ -472,6 +542,10 @@ export default function App(): React.JSX.Element {
       onContextMenu={(event) => {
         event.preventDefault()
         const target = event.target
+        if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+          setAppContextMenu(null)
+          return
+        }
         setAppContextMenu({
           x: event.clientX,
           y: event.clientY,
@@ -534,7 +608,7 @@ export default function App(): React.JSX.Element {
           </div>
         </div>
 
-        <nav className="project-navigation" aria-label="研究项目">
+        <nav className="project-navigation" aria-label="阅读项目">
           {visibleProjects.map((project) => (
             <button
               className={`project-navigation-item ${
@@ -573,11 +647,11 @@ export default function App(): React.JSX.Element {
             {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
             <span>{sidebarCollapsed ? '展开项目栏' : '收起项目栏'}</span>
           </button>
-          <div className="local-database-status" title={mutating ? '本地 SQLite：正在保存更改' : '本地 SQLite：已连接并自动持久化'}>
+          <div className="local-database-status" title={mutating ? '正在保存更改' : '已保存的内容保留在本机'}>
             <Database size={15} />
             <span>
-              <strong>本地 SQLite</strong>
-              <small>{mutating ? '正在保存更改…' : '已连接 · 自动持久化'}</small>
+              <strong>本地资料库</strong>
+              <small>{mutating ? '正在保存更改…' : '已保存内容保留在本机'}</small>
             </span>
             <i className={mutating ? 'saving' : ''} />
           </div>
@@ -591,7 +665,7 @@ export default function App(): React.JSX.Element {
             <span className="project-color" style={{ backgroundColor: currentProject?.color }} />
             <div className="project-heading-copy">
               <div className="project-heading-title-row">
-                <h1>{currentProject?.name ?? '尚未创建研究项目'}</h1>
+                <h1>{currentProject?.name ?? '尚未创建阅读项目'}</h1>
                 {currentProject ? (
                   <div
                     className="project-actions-anchor"
@@ -640,7 +714,7 @@ export default function App(): React.JSX.Element {
                           <Download size={15} />
                           <span>
                             <strong>导出此项目</strong>
-                            <small>保存仅包含当前项目的 SQLite 数据库</small>
+                            <small>备份当前项目的全部记录</small>
                           </span>
                         </button>
                         <button
@@ -663,16 +737,18 @@ export default function App(): React.JSX.Element {
                   </div>
                 ) : null}
               </div>
-              <p>{currentProject?.description || '从阅读材料开始建立可追溯的论文证据。'}</p>
+              <p>{currentProject?.description || '从阅读材料开始，积累自己的笔记与想法。'}</p>
             </div>
           </div>
           <div className="topbar-tools">
             {currentProject ? (
               <div
                 className="project-global-search"
+                onFocus={() => setProjectSearchFocused(true)}
                 onBlur={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setProjectSearchQuery('')
+                  if (!event.currentTarget.contains(event.relatedTarget)) setProjectSearchFocused(false)
                 }}
+                onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setProjectSearchFocused(false) } }}
               >
                 <label>
                   <Search size={15} />
@@ -687,15 +763,15 @@ export default function App(): React.JSX.Element {
                   <div className="project-global-search-results">
                     {projectSearchResults.documents.length > 0 ? (
                       <section>
-                        <header>文献 <span>{projectSearchResults.documents.length}</span></header>
+                        <header>文献 <span>{projectSearchResults.documentTotal}</span></header>
                         {projectSearchResults.documents.map((document) => (
                           <button
                             type="button"
                             key={document.id}
                             onClick={() => {
-                              setReadingRequest({ token: Date.now(), documentId: document.id, page: 1, locator: null })
+                              setReadingRequest({ token: Date.now(), documentId: document.id, page: null, locator: null })
                               setActiveView('reading')
-                              setProjectSearchQuery('')
+                              setProjectSearchFocused(false)
                             }}
                           >
                             <BookOpen size={14} />
@@ -706,22 +782,23 @@ export default function App(): React.JSX.Element {
                     ) : null}
                     {projectSearchResults.cards.length > 0 ? (
                       <section>
-                        <header>卡片 <span>{projectSearchResults.cards.length}</span></header>
+                        <header>卡片 <span>{projectSearchResults.cardTotal}</span></header>
                         {projectSearchResults.cards.map((card) => (
                           <button
                             type="button"
                             key={card.id}
                             onClick={() => {
-                              openSource(card.documentId, card.pdfPage, card.locatorJson)
-                              setProjectSearchQuery('')
+                              setSearchCardId(card.id)
+                              setProjectSearchFocused(false)
                             }}
                           >
                             <FileStack size={14} />
-                            <span><strong>{card.displayText}</strong><small>{card.documentTitle} · {card.comment || card.tags.join(' · ') || '无即时笔记'}</small></span>
+                            <span><strong>{card.comment || card.displayText}</strong><small>{card.documentTitle} · {card.tags.join(' · ') || card.displayText}</small></span>
                           </button>
                         ))}
                       </section>
                     ) : null}
+                    {projectSearchResults.documentTotal > projectSearchResults.documents.length || projectSearchResults.cardTotal > projectSearchResults.cards.length ? <button type="button" onClick={() => setProjectSearchLimit((limit) => limit + 20)}>显示更多结果</button> : null}
                     {projectSearchResults.documents.length === 0 && projectSearchResults.cards.length === 0 ? (
                       <p>没有匹配的文献、摘录、即时笔记或标签。</p>
                     ) : null}
@@ -787,12 +864,13 @@ export default function App(): React.JSX.Element {
         </nav>
 
         <section className="view-container">
+          {fatalError ? <div role="alert" className="workspace-refresh-warning">界面刷新失败，当前仍显示上次内容。<button className="button ghost compact" type="button" onClick={() => void loadWorkspace(snapshot.currentProjectId ?? undefined)}>重试刷新</button><small>{fatalError}</small></div> : null}
           {!currentProject ? (
             <div className="workspace-view empty-workspace-view">
               <div className="empty-state">
                 <FolderKanban size={27} />
-                <h3>从一个研究项目开始</h3>
-                <p>项目可以对应一篇论文、一个章节或任何独立研究任务。</p>
+                <h3>从一个阅读项目开始</h3>
+                <p>用项目组织一本书、一个主题或一项写作任务。</p>
                 <button
                   className="button primary"
                   type="button"
@@ -806,16 +884,19 @@ export default function App(): React.JSX.Element {
             <>
               <div className={`view-pane ${activeView === 'reading' ? 'active' : ''}`} aria-hidden={activeView !== 'reading'}>
                 <ReadingView
+                  key={snapshot.currentProjectId}
+                  isActive={activeView === 'reading'}
                   snapshot={snapshot}
                   runMutation={runMutation}
                   notify={notify}
                   initialRequest={readingRequest}
-                  onFocusHandled={() => setReadingRequest(null)}
+                  onFocusHandled={clearReadingRequest}
                   onSelectedDocumentChange={setReadingDocumentId}
                 />
               </div>
               <div className={`view-pane ${activeView === 'library' ? 'active' : ''}`} aria-hidden={activeView !== 'library'}>
                 <LibraryView
+                  key={snapshot.currentProjectId}
                   snapshot={snapshot}
                   runMutation={runMutation}
                   currentReadingDocumentId={readingDocumentId}
@@ -825,16 +906,17 @@ export default function App(): React.JSX.Element {
               </div>
               <div className={`view-pane ${activeView === 'synthesis' ? 'active' : ''}`} aria-hidden={activeView !== 'synthesis'}>
                 <SynthesisView
+                  key={snapshot.currentProjectId}
                   snapshot={snapshot}
                   runMutation={runMutation}
                   focusCardId={focusCardId}
                   initialMode={synthesisMode}
-                  onFocusHandled={() => setFocusCardId(null)}
+                  onFocusHandled={clearFocusCard}
                   onOpenSource={openSource}
                 />
               </div>
               <div className={`view-pane ${activeView === 'outline' ? 'active' : ''}`} aria-hidden={activeView !== 'outline'}>
-                <OutlineView snapshot={snapshot} runMutation={runMutation} onOpenSource={openSource} />
+                <OutlineView key={snapshot.currentProjectId} snapshot={snapshot} runMutation={runMutation} onOpenSource={openSource} />
               </div>
             </>
           )}
@@ -849,9 +931,9 @@ export default function App(): React.JSX.Element {
           onClose={() => setAppContextMenu(null)}
           items={appContextMenu.editable
             ? [
-                { id: 'cut', label: '剪切', icon: <Scissors size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'cut') },
-                { id: 'copy', label: '复制', icon: <Copy size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'copy') },
-                { id: 'paste', label: '粘贴', icon: <ClipboardPaste size={14} />, onSelect: () => runEditingCommand(appContextMenu.editable, 'paste') },
+                { id: 'cut', label: '剪切', icon: <Scissors size={14} />, onSelect: () => { if (!runEditingCommand(appContextMenu.editable, 'cut')) notify('当前环境未能完成剪切，请使用 Ctrl+X。', 'warning') } },
+                { id: 'copy', label: '复制', icon: <Copy size={14} />, onSelect: () => { if (!runEditingCommand(appContextMenu.editable, 'copy')) notify('当前环境未能完成复制，请使用 Ctrl+C。', 'warning') } },
+                { id: 'paste', label: '粘贴', icon: <ClipboardPaste size={14} />, onSelect: () => { if (!runEditingCommand(appContextMenu.editable, 'paste')) notify('当前环境未能读取剪贴板，请使用 Ctrl+V。', 'warning') } },
                 { id: 'select-all', label: '全选', icon: <TextSelect size={14} />, separatorBefore: true, onSelect: () => appContextMenu.editable?.select() }
               ]
             : tabs.map((tab) => {
@@ -864,6 +946,17 @@ export default function App(): React.JSX.Element {
                   onSelect: () => setActiveView(tab.id)
                 }
               })}
+        />
+      ) : null}
+
+      {searchCard && snapshot ? (
+        <CardEditDialog
+          card={searchCard}
+          researchRoles={snapshot.researchRoles}
+          availableTags={[...new Set(snapshot.cards.flatMap((card) => card.tags))]}
+          onClose={() => setSearchCardId(null)}
+          onSave={async (input) => { if (await runMutation(() => api.updateCard(input), '卡片已更新。')) setSearchCardId(null) }}
+          onOpenSource={() => { setSearchCardId(null); openSource(searchCard.documentId, searchCard.pdfPage, searchCard.locatorJson) }}
         />
       ) : null}
 
@@ -891,7 +984,7 @@ export default function App(): React.JSX.Element {
               async () => {
                 newProjectId = await api.createProject({ name, description, color })
               },
-              '新研究项目已创建。'
+              '新阅读项目已创建。'
             )
             if (succeeded && newProjectId) {
               await loadWorkspace(newProjectId)
@@ -906,7 +999,7 @@ export default function App(): React.JSX.Element {
       {removingProject ? (
         <ConfirmDialog
           title={`删除项目“${removingProject.name}”？`}
-          description="该项目专属的卡片、批注、阅读笔记、二次整理和论文提纲会一并永久删除；仍被其他项目引用的文献会保留。此操作无法撤销，建议先导出此项目。"
+          description="该项目专属的卡片、批注、阅读笔记、二次整理和写作提纲会一并永久删除；仍被其他项目引用的文献会保留。此操作无法撤销，建议先导出此项目。"
           confirmLabel={mutating ? '正在删除…' : '删除项目'}
           dangerous
           onConfirm={() => void removeSelectedProject()}
@@ -921,6 +1014,8 @@ export default function App(): React.JSX.Element {
           busy={databaseBusy || mutating}
           managerBusy={backupManagerBusy}
           manager={backupManager}
+          runtime={backupRuntime}
+          onImportBackup={(backup) => void previewBackupImport(backup.path, backup.kind === 'project' ? 'project' : 'database')}
           managerError={backupManagerError}
           onExport={() => void exportDatabase()}
           onMerge={() => void chooseDatabaseImport('database')}
@@ -958,7 +1053,7 @@ export default function App(): React.JSX.Element {
             void api.revealBackup(backupId).catch((error) => notify(normalizeError(error), 'error'))
           }
           onDeleteBackup={setDeletingBackup}
-          onClose={() => setShowDatabaseDialog(false)}
+          onClose={() => { if (!databaseBusy && !backupManagerBusy) setShowDatabaseDialog(false) }}
         />
       ) : null}
 
@@ -993,58 +1088,7 @@ export default function App(): React.JSX.Element {
         />
       ) : null}
 
-      {showCloseChoice ? (
-        <Modal
-          title="关闭砚台"
-          subtitle="隐藏到后台后，自动备份仍会按本次启动后的倒计时继续运行。"
-          onClose={() => {
-            if (!closeChoiceBusy) setShowCloseChoice(false)
-          }}
-          width="small"
-        >
-          <p className="confirm-description">
-            直接退出会停止自动备份；下次打开软件时会重新开始计算周期，不会补做关闭期间的备份。
-          </p>
-          <div className="modal-actions">
-            <button
-              className="button ghost"
-              type="button"
-              disabled={closeChoiceBusy}
-              onClick={() => setShowCloseChoice(false)}
-            >
-              取消
-            </button>
-            <button
-              className="button ghost"
-              type="button"
-              disabled={closeChoiceBusy}
-              onClick={() => {
-                setCloseChoiceBusy(true)
-                void api.hideToTray()
-                  .then(() => setShowCloseChoice(false))
-                  .catch((error) => notify(normalizeError(error), 'error'))
-                  .finally(() => setCloseChoiceBusy(false))
-              }}
-            >
-              隐藏到后台
-            </button>
-            <button
-              className="button primary"
-              type="button"
-              disabled={closeChoiceBusy}
-              onClick={() => {
-                setCloseChoiceBusy(true)
-                void api.exitApplication().catch((error) => {
-                  setCloseChoiceBusy(false)
-                  notify(normalizeError(error), 'error')
-                })
-              }}
-            >
-              直接退出
-            </button>
-          </div>
-        </Modal>
-      ) : null}
+      {closeDialog}
 
       <div
         className={`toast toast-${toast?.kind ?? 'success'} ${toast ? 'show' : ''}`}
@@ -1064,246 +1108,10 @@ export default function App(): React.JSX.Element {
 function runEditingCommand(
   target: HTMLInputElement | HTMLTextAreaElement | null,
   command: 'cut' | 'copy' | 'paste'
-): void {
-  if (!target) return
+): boolean {
+  if (!target) return false
   target.focus()
-  document.execCommand(command)
-}
-
-interface DatabaseTransferDialogProps {
-  busy: boolean
-  managerBusy: boolean
-  manager: BackupManagerState | null
-  managerError: string | null
-  onExport: () => void
-  onMerge: () => void
-  onImportProject: () => void
-  onRefresh: () => void
-  onChooseDirectory: () => void
-  onResetDirectory: () => void
-  onUpdateRetention: (retentionDays: number | null, retentionCount: number | null) => void
-  onUpdateInterval: (automaticIntervalMinutes: number) => void
-  onCreateSnapshot: () => void
-  onCleanup: () => void
-  onRevealDirectory: () => void
-  onRevealBackup: (backupId: string) => void
-  onDeleteBackup: (backup: BackupRecord) => void
-  onClose: () => void
-}
-
-function DatabaseTransferDialog({
-  busy,
-  managerBusy,
-  manager,
-  managerError,
-  onExport,
-  onMerge,
-  onImportProject,
-  onRefresh,
-  onChooseDirectory,
-  onResetDirectory,
-  onUpdateRetention,
-  onUpdateInterval,
-  onCreateSnapshot,
-  onCleanup,
-  onRevealDirectory,
-  onRevealBackup,
-  onDeleteBackup,
-  onClose
-}: DatabaseTransferDialogProps): React.JSX.Element {
-  const retentionDays = manager?.settings.retentionDays ?? null
-  const retentionCount = manager?.settings.retentionCount ?? null
-  const automaticIntervalMinutes = manager?.settings.automaticIntervalMinutes ?? 120
-  const retentionValue = retentionCount !== null
-    ? `count:${retentionCount}`
-    : retentionDays !== null
-      ? `days:${retentionDays}`
-      : 'never'
-
-  const allBusy = busy || managerBusy
-  return (
-    <Modal
-      title="数据库备份与导入"
-      subtitle="所有导入都采用非破坏性合并；现有项目不会因导入文件内容不完整而消失。"
-      onClose={onClose}
-      width="large"
-    >
-      <div className="database-transfer-options">
-        <button type="button" disabled={allBusy} onClick={onExport}>
-          <span className="database-transfer-icon"><Download size={20} /></span>
-          <span>
-            <strong>导出完整数据库</strong>
-            <small>保存项目、卡片、标注、阅读笔记、二次整理和论文提纲。</small>
-          </span>
-        </button>
-        <button type="button" disabled={allBusy} onClick={onImportProject}>
-          <span className="database-transfer-icon"><Upload size={20} /></span>
-          <span>
-            <strong>导入单个项目</strong>
-            <small>导入项目级数据库，保留当前资料库中的所有已有项目。</small>
-          </span>
-        </button>
-        <button className="database-merge-option" type="button" disabled={allBusy} onClick={onMerge}>
-          <span className="database-transfer-icon"><DatabaseBackup size={20} /></span>
-          <span>
-            <strong>合并完整数据库备份</strong>
-            <small>把备份中的项目和研究数据补充进来，不删除或覆盖当前内容。</small>
-          </span>
-        </button>
-      </div>
-      <div className="database-transfer-note">
-        <ShieldCheck size={16} />
-        <span>数据库备份保存卡片、批注、分类、提纲、文献元数据和 PDF 路径，但不会复制 PDF 原件。</span>
-      </div>
-
-      <section className="backup-manager-section">
-        <header className="backup-manager-heading">
-          <div>
-            <h3>自动安全备份</h3>
-            <p>周期从每次启动软件后开始计算；隐藏到后台仍继续，完全退出后停止。</p>
-          </div>
-          <button className="icon-button" type="button" disabled={managerBusy} onClick={onRefresh} aria-label="刷新备份列表">
-            <RefreshCw className={managerBusy ? 'spin' : undefined} size={16} />
-          </button>
-        </header>
-
-        {managerError ? (
-          <div className="backup-manager-warning"><AlertTriangle size={16} /><span>{managerError}</span></div>
-        ) : null}
-
-        {manager ? (
-          <>
-            <div className="backup-control-panel">
-              <div className="backup-location-row">
-                <div className="backup-location-copy">
-                  <span className="backup-setting-label">备份位置</span>
-                  <code title={manager.settings.effectiveDirectory}>{manager.settings.effectiveDirectory}</code>
-                </div>
-                <div className="backup-setting-actions">
-                  <button className="button ghost compact" type="button" disabled={allBusy} onClick={onRevealDirectory}>
-                    <FolderOpen size={14} /> 打开
-                  </button>
-                  <button className="button ghost compact" type="button" disabled={allBusy} onClick={onChooseDirectory}>
-                    更换
-                  </button>
-                  {manager.settings.customDirectory ? (
-                    <button className="button ghost compact" type="button" disabled={allBusy} onClick={onResetDirectory}>
-                      恢复默认
-                    </button>
-                  ) : null}
-                  <button className="button primary compact backup-now-button" type="button" disabled={allBusy} onClick={onCreateSnapshot}>
-                    {managerBusy ? <LoaderCircle className="spin" size={14} /> : <DatabaseBackup size={14} />} 立即备份
-                  </button>
-                </div>
-              </div>
-
-              {manager.settings.directoryWarning ? (
-                <p className="backup-manager-warning"><AlertTriangle size={14} /><span>{manager.settings.directoryWarning}</span></p>
-              ) : null}
-
-              <div className="backup-policy-row">
-                <label>
-                  <span>周期</span>
-                  <select
-                    value={String(automaticIntervalMinutes)}
-                    disabled={allBusy}
-                    onChange={(event) => onUpdateInterval(Number(event.target.value))}
-                  >
-                    <option value="0">关闭周期备份</option>
-                    <option value="30">每 30 分钟</option>
-                    <option value="60">每 1 小时</option>
-                    <option value="120">每 2 小时（默认）</option>
-                    <option value="360">每 6 小时</option>
-                    <option value="720">每 12 小时</option>
-                    <option value="1440">每 24 小时</option>
-                  </select>
-                </label>
-                <label>
-                  <span>保留</span>
-                  <select
-                    value={retentionValue}
-                    disabled={allBusy}
-                    onChange={(event) => {
-                      const [mode, amount] = event.target.value.split(':')
-                      onUpdateRetention(
-                        mode === 'days' ? Number(amount) : null,
-                        mode === 'count' ? Number(amount) : null
-                      )
-                    }}
-                  >
-                    <option value="never">不自动清理</option>
-                    <option value="count:5">保留最近 5 份</option>
-                    <option value="count:12">保留最近 12 份</option>
-                    <option value="count:30">保留最近 30 份</option>
-                    <option value="days:7">保留最近 7 天</option>
-                    <option value="days:30">保留最近 30 天</option>
-                    <option value="days:90">保留最近 90 天</option>
-                  </select>
-                </label>
-                <button
-                  className="button ghost compact"
-                  type="button"
-                  disabled={allBusy || retentionValue === 'never'}
-                  onClick={onCleanup}
-                >
-                  按策略清理
-                </button>
-              </div>
-
-              <div className="backup-status-line">
-                <span>
-                  {manager.settings.lastAutomaticBackupAt
-                    ? `最近受管备份：${formatDateTime(manager.settings.lastAutomaticBackupAt)}`
-                    : automaticIntervalMinutes === 0
-                      ? '周期备份已关闭，可随时主动备份'
-                      : '尚未完成过受管备份'}
-                </span>
-                {manager.settings.lastCleanupAt ? (
-                  <span title={manager.settings.lastCleanupResult ?? undefined}>
-                    最近清理：{formatDateTime(manager.settings.lastCleanupAt)}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="backup-records-heading">
-              <div>
-                <h4>砚台识别的备份</h4>
-                <span>{manager.records.length} 份 · 校验后当前可用文件共 {formatBytes(manager.totalSizeBytes)}</span>
-              </div>
-            </div>
-            <div className="backup-records-list">
-              {manager.records.length === 0 ? (
-                <div className="backup-empty"><HardDrive size={20} /><span>当前目录中没有可识别的砚台备份；任意 .db 文件不会被误当作可清理备份。</span></div>
-              ) : manager.records.map((record) => (
-                <article className={`backup-record ${record.isAvailable ? '' : 'unavailable'}`} key={record.id}>
-                  <span className={`backup-kind backup-kind-${record.kind}`}>{backupKindLabel(record)}</span>
-                  <div className="backup-record-copy">
-                    <strong title={record.path}>{fileName(record.path)}</strong>
-                    <small>{formatDateTime(record.createdAt)} · {formatBytes(record.sizeBytes)}</small>
-                    <code title={record.path}>{record.path}</code>
-                    {!record.isAvailable ? <em>文件已不在登记位置</em> : null}
-                  </div>
-                  <div className="backup-record-actions">
-                    <button className="button ghost compact" type="button" disabled={!record.isAvailable || allBusy} onClick={() => onRevealBackup(record.id)}>
-                      <FolderOpen size={13} /> 定位
-                    </button>
-                    {record.kind === 'auto' ? (
-                      <button className="button danger compact" type="button" disabled={allBusy} onClick={() => onDeleteBackup(record)}>
-                        <Trash2 size={13} /> 删除
-                      </button>
-                    ) : null}
-                  </div>
-                </article>
-              ))}
-            </div>
-          </>
-        ) : managerBusy ? (
-          <div className="backup-empty"><LoaderCircle className="spin" size={18} /><span>正在读取备份记录…</span></div>
-        ) : null}
-      </section>
-    </Modal>
-  )
+  try { return document.execCommand(command) } catch { return false }
 }
 
 function DatabaseImportResultDialog({
@@ -1448,11 +1256,11 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
 
   return (
     <Modal
-      title={editing ? '编辑研究项目' : '新建研究项目'}
+      title={editing ? '编辑阅读项目' : '新建阅读项目'}
       subtitle={
         editing
           ? '项目信息修改后，已有文献、卡片与提纲结构不会改变。'
-          : '项目可以是一篇论文、一个章节或其他研究任务，不预设类型。'
+          : '按阅读主题、写作任务或资料用途建立项目，不预设类型。'
       }
       onClose={onClose}
       hasUnsavedChanges={hasUnsavedChanges}
@@ -1480,7 +1288,7 @@ function ProjectDialog({ project, busy, onSubmit, onClose }: ProjectDialogProps)
             rows={4}
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="记录研究问题或当前工作范围（可选）"
+            placeholder="记录阅读主题或当前工作范围（可选）"
           />
         </label>
         <label className="field color-field">
@@ -1538,9 +1346,6 @@ function projectDatabaseFileName(projectName: string): string {
   return `砚台项目-${safeName}-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}.db`
 }
 
-function fileName(path: string): string {
-  return path.split(/[\\/]/).pop() ?? path
-}
 
 function loadFontSize(): FontSize {
   if (typeof window === 'undefined') return 'standard'
@@ -1550,36 +1355,4 @@ function loadFontSize(): FontSize {
   } catch {
     return 'standard'
   }
-}
-
-function formatBytes(value: number): string {
-  const size = Math.max(0, value)
-  if (size < 1024) return `${size} B`
-  if (size < 1024 ** 2) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`
-  if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(size < 10 * 1024 ** 2 ? 1 : 0)} MB`
-  return `${(size / 1024 ** 3).toFixed(2)} GB`
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(date)
-}
-
-function backupKindLabel(record: BackupRecord): string {
-  if (record.kind === 'auto') {
-    const name = fileName(record.path)
-    if (name.includes('before-manual')) return '主动备份'
-    if (name.includes('before-scheduled')) return '周期备份'
-    if (name.includes('before-project-import') || name.includes('before-import')) return '导入前备份'
-    return '安全备份'
-  }
-  if (record.kind === 'project') return '单项目导出'
-  return '完整数据库导出'
 }
